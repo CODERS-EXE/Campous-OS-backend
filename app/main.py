@@ -1,0 +1,170 @@
+from contextlib import asynccontextmanager
+import logging
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query
+from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from jose import JWTError, jwt
+
+from app.core.config import get_settings
+from app.core.websocket_manager import manager
+from app.db.mongo import close_db, init_db
+from app.routers import ai, assignments, attendance, auth, bus, colleges, hostel, notifications, results, timetable, users
+from app.models.user import User
+
+logger = logging.getLogger(__name__)
+
+settings = get_settings()
+limiter = Limiter(key_func=get_remote_address)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+    await close_db()
+
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth.router, prefix="/api/v1")
+app.include_router(colleges.router, prefix="/api/v1")
+app.include_router(users.router, prefix="/api/v1")
+app.include_router(notifications.router, prefix="/api/v1")
+app.include_router(attendance.router, prefix="/api/v1")
+app.include_router(assignments.router, prefix="/api/v1")
+app.include_router(results.router, prefix="/api/v1")
+app.include_router(timetable.router, prefix="/api/v1")
+app.include_router(hostel.router, prefix="/api/v1")
+app.include_router(ai.router, prefix="/api/v1")
+app.include_router(bus.router, prefix="/api/v1")
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "app": settings.APP_NAME, "version": settings.APP_VERSION}
+
+
+@app.get("/")
+async def root():
+    return {"message": "CampusOS API", "docs": "/docs"}
+
+
+async def get_user_from_token(token: str) -> User:
+    """Validate JWT token and return user"""
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            return None
+        user = await User.get(user_id)
+        return user
+    except JWTError:
+        return None
+
+
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    user_id: str,
+    token: str = Query(...)
+):
+    """
+    WebSocket endpoint for real-time notifications
+    Requires JWT token in query parameter: /ws/{user_id}?token=<jwt_token>
+    
+    Connection flow:
+    1. Client connects with user_id and JWT token
+    2. Server validates token and authenticates user
+    3. Connection is added to manager with role and college info
+    4. Server sends connection confirmation
+    5. Client receives real-time notifications
+    6. On disconnect, connection is cleaned up
+    
+    Message format:
+    {
+        "type": "notification|connection|heartbeat",
+        "data": {...notification data...}
+    }
+    """
+    # Authenticate user with JWT token
+    user = await get_user_from_token(token)
+    
+    if not user or str(user.id) != user_id:
+        await websocket.close(code=1008, reason="Unauthorized")
+        logger.warning(f"WebSocket authentication failed for user_id={user_id}")
+        return
+    
+    # Get user details for connection
+    role = user.role
+    college_id = str(user.college_id) if user.college_id else None
+    tenant_id = user.tenant_id if hasattr(user, 'tenant_id') else None
+    
+    # Connect to WebSocket manager
+    await manager.connect(
+        websocket=websocket,
+        user_id=user_id,
+        role=role,
+        college_id=college_id,
+        tenant_id=tenant_id
+    )
+    
+    try:
+        # Keep connection alive and handle incoming messages
+        while True:
+            data = await websocket.receive_text()
+            
+            # Handle heartbeat/ping messages
+            if data == "ping":
+                await websocket.send_text("pong")
+            
+            # Handle other client messages (can be extended)
+            elif data.startswith("{"):
+                try:
+                    import json
+                    message = json.loads(data)
+                    
+                    # Handle read receipts
+                    if message.get("type") == "read_receipt":
+                        notification_id = message.get("notification_id")
+                        logger.info(f"Read receipt from {user_id} for notification {notification_id}")
+                    
+                    # Echo back acknowledgment
+                    await manager.send_personal_message(
+                        json.dumps({"type": "ack", "received": True}),
+                        user_id
+                    )
+                except json.JSONDecodeError:
+                    pass
+                    
+    except WebSocketDisconnect:
+        manager.disconnect(user_id)
+        logger.info(f"WebSocket disconnected normally: user={user_id}")
+    except Exception as e:
+        manager.disconnect(user_id)
+        logger.error(f"WebSocket error for user={user_id}: {e}")
+
+
+@app.get("/api/v1/ws/stats")
+async def websocket_stats():
+    """Get WebSocket connection statistics (for monitoring)"""
+    return manager.get_connection_stats()
