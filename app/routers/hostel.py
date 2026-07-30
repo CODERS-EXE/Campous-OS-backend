@@ -1,6 +1,6 @@
 from typing import Annotated, List, Optional
 from beanie import PydanticObjectId
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.core.constants import UserRole
@@ -10,6 +10,11 @@ from app.models.hostel import HostelBuilding, HostelRequest, Outpass, Room, Room
 from app.models.student import Student
 from app.models.user import User
 from app.services.hostel import HostelService
+from app.services.notification_service import (
+    notify_outpass_approved,
+    notify_outpass_rejected,
+    notify_room_changed,
+)
 
 router = APIRouter(prefix="/hostel", tags=["hostel"])
 
@@ -371,6 +376,7 @@ async def allocate_room(
 @router.post("/allocations/change")
 async def change_room(
     body: AllocationChangeRequest,
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(require_roles(UserRole.WARDEN, UserRole.COLLEGE_ADMIN, UserRole.SUPER_ADMIN))],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
@@ -382,6 +388,18 @@ async def change_room(
             allocated_by=str(user.id),
             remarks=body.remarks
         )
+
+        # Auto-notify student about room change
+        new_room = await Room.get(PydanticObjectId(body.new_room_id))
+        if new_room:
+            background_tasks.add_task(
+                notify_room_changed,
+                college_id=college.id,
+                student_user_id=body.student_id,
+                new_room=new_room.room_number,
+                created_by=user.id,
+            )
+
         return {
             "id": str(alloc.id),
             "student_id": alloc.student_id,
@@ -715,6 +733,7 @@ async def create_outpass(
 async def update_outpass(
     outpass_id: str,
     body: OutpassUpdateRequest,
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(require_roles(UserRole.WARDEN, UserRole.COLLEGE_ADMIN))],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
@@ -727,6 +746,27 @@ async def update_outpass(
     outpass.remarks = body.remarks
     outpass.updated_at = utcnow()
     await outpass.save()
+
+    # Auto-notify student about outpass decision
+    if body.status == "approved":
+        background_tasks.add_task(
+            notify_outpass_approved,
+            college_id=college.id,
+            student_user_id=outpass.student_id,
+            from_date=outpass.from_date.strftime("%Y-%m-%d"),
+            to_date=outpass.to_date.strftime("%Y-%m-%d"),
+            outpass_id=str(outpass.id),
+            created_by=user.id,
+        )
+    elif body.status == "rejected":
+        background_tasks.add_task(
+            notify_outpass_rejected,
+            college_id=college.id,
+            student_user_id=outpass.student_id,
+            reason=body.remarks or "No reason provided",
+            outpass_id=str(outpass.id),
+            created_by=user.id,
+        )
 
     student_user = await User.get(PydanticObjectId(outpass.student_id) if len(outpass.student_id) == 24 else outpass.student_id)
     student = await Student.find_one(Student.user_id == PydanticObjectId(outpass.student_id)) if len(outpass.student_id) == 24 else None

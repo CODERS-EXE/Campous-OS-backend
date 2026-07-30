@@ -11,7 +11,7 @@ from jose import JWTError, jwt
 from app.core.config import get_settings
 from app.core.websocket_manager import manager
 from app.db.mongo import close_db, init_db
-from app.routers import ai, assignments, attendance, auth, bus, colleges, fees, hostel, library, notifications, placements, results, timetable, users
+from app.routers import ai, assignments, attendance, auth, bus, colleges, exams, fees, hostel, library, notifications, placements, results, timetable, users
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,7 @@ app.include_router(bus.router, prefix="/api/v1")
 app.include_router(fees.router, prefix="/api/v1")
 app.include_router(library.router, prefix="/api/v1")
 app.include_router(placements.router, prefix="/api/v1")
+app.include_router(exams.router, prefix="/api/v1")
 
 
 @app.get("/health")

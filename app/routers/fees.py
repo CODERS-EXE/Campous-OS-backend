@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Annotated, List, Optional
 
 from beanie import PydanticObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 
 from app.core.constants import UserRole
@@ -13,6 +13,7 @@ from app.models.college import College
 from app.models.fees import FeeStructure, Invoice, Payment, Receipt, StudentFee
 from app.models.student import Student
 from app.models.user import User
+from app.services.notification_service import notify_fee_generated, notify_fee_paid
 
 
 def utcnow() -> datetime:
@@ -168,6 +169,7 @@ async def delete_fee_structure(
 @router.post("/assign")
 async def assign_fees(
     req: FeeAssignRequest,
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(require_roles(UserRole.COLLEGE_ADMIN, UserRole.SUPER_ADMIN))],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
@@ -225,6 +227,17 @@ async def assign_fees(
         )
         await sf.insert()
         assigned_count += 1
+
+        # Auto-notify student about new fee
+        background_tasks.add_task(
+            notify_fee_generated,
+            college_id=college.id,
+            student_user_id=str(st.user_id),
+            amount=net_amt,
+            due_date=req.due_date,
+            student_fee_id=str(sf.id),
+            created_by=user.id,
+        )
 
     return {"ok": True, "assigned_count": assigned_count, "total_target": len(student_docs)}
 
@@ -394,6 +407,7 @@ async def record_offline_payment(
 @router.post("/payments/{payment_id}/approve")
 async def approve_payment(
     payment_id: str,
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(require_roles(UserRole.COLLEGE_ADMIN, UserRole.SUPER_ADMIN))],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
@@ -449,6 +463,16 @@ async def approve_payment(
         transaction_id=payment.transaction_id,
     )
     await receipt.insert()
+
+    # Auto-notify student that payment is confirmed
+    background_tasks.add_task(
+        notify_fee_paid,
+        college_id=college.id,
+        student_user_id=str(payment.student_id),
+        amount=payment.amount,
+        transaction_id=payment.transaction_id,
+        created_by=user.id,
+    )
 
     return {"ok": True, "payment": payment, "receipt": receipt}
 

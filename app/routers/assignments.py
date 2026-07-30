@@ -1,6 +1,6 @@
 from typing import Annotated, List
 from beanie import PydanticObjectId
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
 from app.core.deps import get_tenant_college, get_tenant_scoped_user
 from app.models.college import College
@@ -13,6 +13,7 @@ from app.core.constants import UserRole
 from app.models.user import User
 from beanie import PydanticObjectId
 from fastapi import HTTPException, status
+from app.services.notification_service import notify_assignment_created
 
 router = APIRouter(prefix="/assignments", tags=["assignments"])
 
@@ -20,6 +21,7 @@ router = APIRouter(prefix="/assignments", tags=["assignments"])
 @router.post("", response_model=AssignmentOut, status_code=201)
 async def create_assignment_endpoint(
     body: AssignmentCreate,
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(get_tenant_scoped_user)],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
@@ -37,7 +39,30 @@ async def create_assignment_endpoint(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No students assigned to this faculty")
 
     a = await create_assignment(college.id, user.id, body.model_dump())
+
+    # Auto-notify students about the new assignment
+    due_str = str(body.due_date) if body.due_date else "TBD"
+    background_tasks.add_task(
+        notify_assignment_created,
+        college_id=college.id,
+        assignment_title=a.title,
+        subject=a.subject or "General",
+        due_date=due_str,
+        assignment_id=str(a.id),
+        created_by=user.id,
+    )
+
     return AssignmentOut(
+        id=str(a.id),
+        created_by=str(a.created_by),
+        title=a.title,
+        description=a.description,
+        subject=a.subject,
+        due_date=a.due_date,
+        attachments=a.attachments,
+        published=a.published,
+        created_at=a.created_at,
+    )
         id=str(a.id),
         created_by=str(a.created_by),
         title=a.title,

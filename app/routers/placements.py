@@ -8,7 +8,7 @@ from datetime import datetime
 import csv
 import io
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 from beanie import PydanticObjectId
 
@@ -23,6 +23,7 @@ from app.models.placement_drive import PlacementDrive, EligibilityCriteria, Pack
 from app.models.student_application import StudentApplication
 from app.models.interview_round import InterviewRound
 from app.models.placement_offer import PlacementOffer
+from app.services.notification_service import notify_placement_drive_created, notify_placement_selected
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +204,7 @@ async def list_placement_drives(
 @router.post("/drives", status_code=201)
 async def create_placement_drive(
     drive_data: dict,
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(require_roles(UserRole.COLLEGE_ADMIN))],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
@@ -239,17 +241,15 @@ async def create_placement_drive(
     
     # Send notification to eligible students if drive is open
     if drive.status == "open":
-        await manager.send_notification(
-            notification_data={
-                "id": str(drive.id),
-                "title": f"New Placement Drive: {company.name}",
-                "body": f"{drive.role} - {drive.package.ctc} LPA",
-                "type": "placement",
-                "action_url": "/student/placements",
-            },
-            target_scope="role",
-            target_role="student",
-            college_id=str(college.id)
+        deadline_str = drive.deadline.strftime("%Y-%m-%d") if drive.deadline else "TBD"
+        background_tasks.add_task(
+            notify_placement_drive_created,
+            college_id=college.id,
+            company_name=company.name,
+            role_name=drive.role,
+            deadline=deadline_str,
+            drive_id=str(drive.id),
+            created_by=user.id,
         )
     
     return drive
@@ -550,6 +550,7 @@ async def apply_to_drive(
 async def update_application_status(
     application_id: str,
     status_data: dict,
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(require_roles(UserRole.COLLEGE_ADMIN, UserRole.FACULTY))],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
@@ -580,29 +581,40 @@ async def update_application_status(
         drive.selected_count += 1
     await drive.save()
     
-    # Send notification to student
-    status_messages = {
-        "shortlisted": "Congratulations! You have been shortlisted",
-        "interview_scheduled": "Your interview has been scheduled",
-        "selected": "Congratulations! You have been selected",
-        "rejected": "Application status updated",
-    }
-    
-    if new_status in status_messages:
+    # Send targeted notification for "selected" status via notification service
+    if new_status == "selected":
+        company = await Company.get(drive.company_id)
+        company_name = company.name if company else drive.title
+        background_tasks.add_task(
+            notify_placement_selected,
+            college_id=college.id,
+            student_user_id=str(application.student_id),
+            company_name=company_name,
+            role_name=drive.role,
+            application_id=str(application.id),
+            created_by=user.id,
+        )
+    elif new_status in ("shortlisted", "interview_scheduled", "rejected"):
+        # Use existing WebSocket manager for other status updates
+        status_messages = {
+            "shortlisted": "You have been shortlisted",
+            "interview_scheduled": "Your interview has been scheduled",
+            "rejected": "Application status updated",
+        }
         await manager.send_notification(
             notification_data={
                 "id": str(application.id),
                 "title": f"Application Update: {drive.title}",
-                "body": status_messages[new_status],
+                "body": status_messages.get(new_status, "Status updated"),
                 "type": "placement",
-                "priority": "high" if new_status == "selected" else "normal",
-                "action_url": "/student/applications",
+                "priority": "normal",
+                "action_url": "/student/placement-applications",
             },
             target_scope="user",
             target_user_id=str(application.student_id),
             college_id=str(college.id)
         )
-    
+
     return application
 
 

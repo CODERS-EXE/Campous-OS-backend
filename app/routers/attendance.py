@@ -1,6 +1,6 @@
 from typing import Annotated, List
 from beanie import PydanticObjectId
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
 from app.core.deps import get_tenant_college, get_tenant_scoped_user, require_roles
 from app.models.college import College
@@ -13,6 +13,7 @@ from app.core.constants import UserRole
 from app.models.user import User
 from beanie import PydanticObjectId
 from fastapi import HTTPException, status
+from app.services.notification_service import notify_attendance_marked
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
 
@@ -20,6 +21,7 @@ router = APIRouter(prefix="/attendance", tags=["attendance"])
 @router.post("", response_model=AttendanceOut, status_code=201)
 async def create_attendance_endpoint(
     body: AttendanceCreate,
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(get_tenant_scoped_user)],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
@@ -52,6 +54,20 @@ async def create_attendance_endpoint(
         validated_records.append({"student_id": sid, "status": rec.status, "marked_by": user.id if user.role == UserRole.FACULTY.value else None})
 
     att = await create_attendance(college.id, user.id, body.subject, body.date, body.session_name, validated_records)
+
+    # Auto-notify each student about their attendance status
+    date_str = str(body.date)
+    for rec in validated_records:
+        background_tasks.add_task(
+            notify_attendance_marked,
+            college_id=college.id,
+            student_user_id=str(rec["student_id"]),
+            subject=body.subject,
+            date=date_str,
+            status=rec["status"],
+            created_by=user.id,
+        )
+
     return AttendanceOut(
         id=str(att.id),
         faculty_id=str(att.faculty_id),

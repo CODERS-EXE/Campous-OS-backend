@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, List, Optional
 
 from beanie import PydanticObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 
 from app.core.constants import UserRole
@@ -12,6 +12,7 @@ from app.core.deps import get_current_user, get_tenant_college, require_roles
 from app.models.college import College
 from app.models.library import Book, BookCategory, BookIssue
 from app.models.user import User
+from app.services.notification_service import notify_book_issued, notify_book_overdue
 
 
 def utcnow() -> datetime:
@@ -287,6 +288,7 @@ async def delete_book(
 @router.post("/issues", status_code=status.HTTP_201_CREATED)
 async def issue_book(
     req: IssueBookRequest,
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(require_roles(UserRole.COLLEGE_ADMIN, UserRole.SUPER_ADMIN))],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
@@ -330,12 +332,24 @@ async def issue_book(
     book.updated_at = utcnow()
     await book.save()
 
+    # Auto-notify user that book has been issued
+    background_tasks.add_task(
+        notify_book_issued,
+        college_id=college.id,
+        user_id=str(target_user.id),
+        book_title=book.title,
+        due_date=due_dt.strftime("%Y-%m-%d"),
+        issue_id=str(issue.id),
+        created_by=user.id,
+    )
+
     return issue
 
 
 @router.post("/return")
 async def return_book(
     req: ReturnBookRequest,
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(require_roles(UserRole.COLLEGE_ADMIN, UserRole.SUPER_ADMIN))],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
@@ -382,6 +396,19 @@ async def return_book(
             book.available_quantity = min(book.total_quantity, book.available_quantity + 1)
             book.updated_at = now
             await book.save()
+
+    # If overdue, notify user about the fine
+    if fine_amount > 0:
+        overdue_days = int((now - issue.due_date).days) if now > issue.due_date else 0
+        background_tasks.add_task(
+            notify_book_overdue,
+            college_id=college.id,
+            user_id=str(issue.user_id),
+            book_title=issue.book_title,
+            overdue_days=overdue_days,
+            fine_amount=fine_amount,
+            created_by=user.id,
+        )
 
     return {"ok": True, "issue": issue, "fine_amount": fine_amount}
 
