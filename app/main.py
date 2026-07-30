@@ -11,7 +11,7 @@ from jose import JWTError, jwt
 from app.core.config import get_settings
 from app.core.websocket_manager import manager
 from app.db.mongo import close_db, init_db
-from app.routers import ai, assignments, attendance, auth, bus, colleges, hostel, notifications, results, timetable, users
+from app.routers import ai, assignments, attendance, auth, bus, colleges, fees, hostel, library, notifications, placements, results, timetable, users
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,9 @@ app.include_router(timetable.router, prefix="/api/v1")
 app.include_router(hostel.router, prefix="/api/v1")
 app.include_router(ai.router, prefix="/api/v1")
 app.include_router(bus.router, prefix="/api/v1")
+app.include_router(fees.router, prefix="/api/v1")
+app.include_router(library.router, prefix="/api/v1")
+app.include_router(placements.router, prefix="/api/v1")
 
 
 @app.get("/health")
@@ -72,7 +75,7 @@ async def root():
 async def get_user_from_token(token: str) -> User:
     """Validate JWT token and return user"""
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         user_id: str = payload.get("sub")
         if user_id is None:
             return None
