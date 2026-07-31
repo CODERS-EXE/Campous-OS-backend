@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Annotated, Optional
 
+# pyrefly: ignore [missing-import]
 from beanie import PydanticObjectId
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -28,6 +29,8 @@ async def get_current_user(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
+    if not PydanticObjectId.is_valid(user_id):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user ID format")
     user = await User.get(PydanticObjectId(user_id))
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
@@ -38,7 +41,7 @@ async def resolve_tenant(
     x_college_id: Annotated[Optional[str], Header(alias="X-College-Id")] = None,
     x_college_subdomain: Annotated[Optional[str], Header(alias="X-College-Subdomain")] = None,
 ) -> Optional[College]:
-    if x_college_id:
+    if x_college_id and PydanticObjectId.is_valid(x_college_id):
         college = await College.get(PydanticObjectId(x_college_id))
         if college and college.status == "active":
             return college
@@ -47,6 +50,7 @@ async def resolve_tenant(
         if college and college.status == "active":
             return college
     return None
+
 
 
 async def get_tenant_college(

@@ -1,4 +1,5 @@
 from typing import Annotated, List
+# pyrefly: ignore [missing-import]
 from beanie import PydanticObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
@@ -11,6 +12,7 @@ from app.schemas.assignment import AssignmentCreate, AssignmentOut, SubmissionCr
 from app.services.assignments import create_assignment, list_assignments, update_assignment, create_submission, list_submissions_for_assignment
 from app.core.constants import UserRole
 from app.models.user import User
+# pyrefly: ignore [missing-import]
 from beanie import PydanticObjectId
 from fastapi import HTTPException, status
 from app.services.notification_service import notify_assignment_created
@@ -157,7 +159,35 @@ async def submit_assignment(
     )
 
 
+@router.get("/my-submissions", response_model=List[SubmissionOut])
+async def my_submissions(
+    user: Annotated[User, Depends(get_tenant_scoped_user)],
+    college: Annotated[College, Depends(get_tenant_college)],
+    limit: int = 100,
+    skip: int = 0,
+):
+    if user.role != UserRole.STUDENT.value:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only students can access my-submissions")
+    from app.models.submission import Submission
+    subs = await Submission.find(
+        Submission.college_id == college.id,
+        Submission.student_id == user.id
+    ).skip(skip).limit(limit).to_list()
+    return [
+        SubmissionOut(
+            id=str(s.id),
+            assignment_id=str(s.assignment_id),
+            student_id=str(s.student_id),
+            files=s.files,
+            submitted_at=s.submitted_at,
+            marks_awarded=s.marks_awarded,
+        )
+        for s in subs
+    ]
+
+
 @router.get("/{assignment_id}/submissions", response_model=List[SubmissionOut])
+
 async def list_submissions(assignment_id: str, user: Annotated[User, Depends(get_tenant_scoped_user)], college: Annotated[College, Depends(get_tenant_college)], limit: int = 100, skip: int = 0):
     # faculty or admin can view
     if user.role not in (UserRole.FACULTY.value, UserRole.COLLEGE_ADMIN.value):

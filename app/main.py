@@ -3,7 +3,9 @@ import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
+# pyrefly: ignore [missing-import]
 from slowapi import Limiter, _rate_limit_exceeded_handler
+# pyrefly: ignore [missing-import]
 from slowapi.errors import RateLimitExceeded
 # pyrefly: ignore [missing-import]
 from slowapi.util import get_remote_address
@@ -36,8 +38,16 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+from bson.errors import InvalidId
+from fastapi.responses import JSONResponse
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+@app.exception_handler(InvalidId)
+async def invalid_id_exception_handler(request, exc):
+    return JSONResponse(status_code=400, content={"detail": "Invalid ID format"})
+
 
 app.add_middleware(
     CORSMiddleware,
