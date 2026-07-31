@@ -1,8 +1,7 @@
 from datetime import datetime
 from typing import Optional, List
-from beanie import Document
+from beanie import Document, PydanticObjectId
 from pydantic import Field, BaseModel
-from bson import ObjectId
 
 
 class QuestionSection(BaseModel):
@@ -17,7 +16,7 @@ class QuestionPaper(Document):
     QuestionPaper model for storing question paper metadata
     Actual paper files stored in cloud storage
     """
-    subject_exam_id: ObjectId = Field(..., description="Reference to SubjectExam")
+    subject_exam_id: PydanticObjectId = Field(..., description="Reference to SubjectExam")
     
     # Paper details
     paper_code: str = Field(..., description="Unique paper code")
@@ -43,12 +42,12 @@ class QuestionPaper(Document):
     accessible_from: Optional[datetime] = Field(None, description="When students can access")
     
     # Multi-tenant
-    college_id: ObjectId = Field(..., description="College reference")
+    college_id: PydanticObjectId = Field(..., description="College reference")
     
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    uploaded_by: Optional[ObjectId] = Field(None, description="Faculty who uploaded")
+    uploaded_by: Optional[PydanticObjectId] = Field(None, description="Faculty who uploaded")
     
     class Settings:
         name = "question_papers"

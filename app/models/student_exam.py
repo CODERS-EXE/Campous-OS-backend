@@ -1,8 +1,7 @@
 from datetime import datetime
 from typing import Optional
-from beanie import Document
+from beanie import Document, PydanticObjectId
 from pydantic import Field
-from bson import ObjectId
 
 
 class StudentExam(Document):
@@ -10,9 +9,9 @@ class StudentExam(Document):
     StudentExam model for tracking individual student's exam participation and marks
     Represents a student's attempt at a specific subject exam
     """
-    subject_exam_id: ObjectId = Field(..., description="Reference to SubjectExam")
-    exam_id: ObjectId = Field(..., description="Reference to parent Exam")
-    student_id: ObjectId = Field(..., description="Reference to Student")
+    subject_exam_id: PydanticObjectId = Field(..., description="Reference to SubjectExam")
+    exam_id: PydanticObjectId = Field(..., description="Reference to parent Exam")
+    student_id: PydanticObjectId = Field(..., description="Reference to Student")
     
     # Student details (denormalized for quick access)
     student_name: str = Field(..., description="Student name")
@@ -26,7 +25,7 @@ class StudentExam(Document):
     # Attendance
     attendance: str = Field(default="not_marked", description="Attendance: present, absent, not_marked")
     attendance_marked_at: Optional[datetime] = Field(None, description="When attendance was marked")
-    attendance_marked_by: Optional[ObjectId] = Field(None, description="Faculty who marked")
+    attendance_marked_by: Optional[PydanticObjectId] = Field(None, description="Faculty who marked")
     
     # Marks
     internal_marks: Optional[float] = Field(None, ge=0, description="Internal assessment marks")
@@ -39,8 +38,8 @@ class StudentExam(Document):
     result_status: str = Field(default="pending", description="Status: pass, fail, absent, pending")
     
     # Marks entry tracking
-    internal_marks_entered_by: Optional[ObjectId] = Field(None, description="Faculty who entered internal marks")
-    external_marks_entered_by: Optional[ObjectId] = Field(None, description="Faculty who entered external marks")
+    internal_marks_entered_by: Optional[PydanticObjectId] = Field(None, description="Faculty who entered internal marks")
+    external_marks_entered_by: Optional[PydanticObjectId] = Field(None, description="Faculty who entered external marks")
     internal_marks_entered_at: Optional[datetime] = Field(None)
     external_marks_entered_at: Optional[datetime] = Field(None)
     
@@ -50,7 +49,7 @@ class StudentExam(Document):
     attempt_number: int = Field(default=1, ge=1, description="Exam attempt number")
     
     # Multi-tenant
-    college_id: ObjectId = Field(..., description="College reference")
+    college_id: PydanticObjectId = Field(..., description="College reference")
     
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)

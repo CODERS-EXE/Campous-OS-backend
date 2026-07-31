@@ -13,6 +13,7 @@ class Faculty(Document):
     college_id: PydanticObjectId
     user_id: PydanticObjectId
     department: str
+    course: Optional[str] = None
     designation: Optional[str] = None
     status: str = "active"
     subjects: List[str] = Field(default_factory=list)

@@ -1,13 +1,12 @@
 from datetime import datetime
 from typing import Optional, List
-from beanie import Document
+from beanie import Document, PydanticObjectId
 from pydantic import Field, BaseModel
-from bson import ObjectId
 
 
 class SubjectResult(BaseModel):
     """Individual subject result within semester"""
-    subject_exam_id: ObjectId
+    subject_exam_id: PydanticObjectId
     subject_name: str
     subject_code: str
     credits: int
@@ -24,8 +23,8 @@ class ExamResult(Document):
     ExamResult model for consolidated semester results
     Stores overall performance with SGPA/CGPA
     """
-    exam_id: ObjectId = Field(..., description="Reference to Exam")
-    student_id: ObjectId = Field(..., description="Reference to Student")
+    exam_id: PydanticObjectId = Field(..., description="Reference to Exam")
+    student_id: PydanticObjectId = Field(..., description="Reference to Student")
     
     # Student details (denormalized)
     student_name: str = Field(..., description="Student name")
@@ -60,13 +59,13 @@ class ExamResult(Document):
     # Publication
     is_published: bool = Field(default=False, description="Whether result is published to student")
     published_at: Optional[datetime] = Field(None, description="Publication timestamp")
-    published_by: Optional[ObjectId] = Field(None, description="Admin who published")
+    published_by: Optional[PydanticObjectId] = Field(None, description="Admin who published")
     
     # Ranking
     rank: Optional[int] = Field(None, description="Rank in class/semester")
     
     # Multi-tenant
-    college_id: ObjectId = Field(..., description="College reference")
+    college_id: PydanticObjectId = Field(..., description="College reference")
     
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)

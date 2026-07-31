@@ -113,6 +113,7 @@ async def create_user(
             college_id=college.id,
             user_id=user.id,
             department=department or "General",
+            course=course,
             designation=designation,
             status=status or "active",
             subjects=subjects or [],
@@ -206,6 +207,8 @@ async def update_user(
             raise ValueError("Faculty profile not found")
         if department is not None:
             faculty.department = department
+        if course is not None:
+            faculty.course = course
         if designation is not None:
             faculty.designation = designation
         if status is not None:

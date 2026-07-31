@@ -1,8 +1,7 @@
 from datetime import datetime, time
 from typing import Optional, List
-from beanie import Document
+from beanie import Document, PydanticObjectId
 from pydantic import Field
-from bson import ObjectId
 
 
 class SubjectExam(Document):
@@ -10,8 +9,8 @@ class SubjectExam(Document):
     SubjectExam model for individual subject examination scheduling
     Each exam has multiple subject exams
     """
-    exam_id: ObjectId = Field(..., description="Reference to parent Exam")
-    subject_id: ObjectId = Field(..., description="Reference to Subject")
+    exam_id: PydanticObjectId = Field(..., description="Reference to parent Exam")
+    subject_id: PydanticObjectId = Field(..., description="Reference to Subject")
     subject_name: str = Field(..., description="Subject name for quick access")
     subject_code: str = Field(..., description="Subject code")
     
@@ -38,7 +37,7 @@ class SubjectExam(Document):
     status: str = Field(default="scheduled", description="Status: scheduled, ongoing, completed, cancelled")
     
     # Multi-tenant
-    college_id: ObjectId = Field(..., description="College reference")
+    college_id: PydanticObjectId = Field(..., description="College reference")
     
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)

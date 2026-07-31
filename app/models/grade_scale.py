@@ -1,8 +1,7 @@
 from datetime import datetime
-from typing import List
-from beanie import Document
+from typing import List, Optional
+from beanie import Document, PydanticObjectId
 from pydantic import Field, BaseModel
-from bson import ObjectId
 
 
 class GradeRange(BaseModel):
@@ -19,7 +18,7 @@ class GradeScale(Document):
     GradeScale model for configurable grading system
     Defines how marks are converted to grades and grade points
     """
-    college_id: ObjectId = Field(..., description="College reference")
+    college_id: PydanticObjectId = Field(..., description="College reference")
     
     # Scale details
     scale_name: str = Field(..., description="Name of grading scale (e.g., 10-Point Scale)")
@@ -40,7 +39,7 @@ class GradeScale(Document):
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    created_by: Optional[ObjectId] = Field(None, description="Admin who created")
+    created_by: Optional[PydanticObjectId] = Field(None, description="Admin who created")
     
     class Settings:
         name = "grade_scales"

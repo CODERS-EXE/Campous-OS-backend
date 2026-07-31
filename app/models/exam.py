@@ -1,8 +1,7 @@
 from datetime import datetime
 from typing import Optional
-from beanie import Document
+from beanie import Document, PydanticObjectId
 from pydantic import Field
-from bson import ObjectId
 
 
 class Exam(Document):
@@ -20,12 +19,12 @@ class Exam(Document):
     description: Optional[str] = Field(None, description="Exam description and instructions")
     
     # Multi-tenant
-    college_id: ObjectId = Field(..., description="College reference")
+    college_id: PydanticObjectId = Field(..., description="College reference")
     
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    created_by: Optional[ObjectId] = Field(None, description="Admin who created")
+    created_by: Optional[PydanticObjectId] = Field(None, description="Admin who created")
     
     # Statistics
     total_subjects: int = Field(default=0, description="Number of subjects in exam")

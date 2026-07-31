@@ -63,16 +63,6 @@ async def create_assignment_endpoint(
         published=a.published,
         created_at=a.created_at,
     )
-        id=str(a.id),
-        created_by=str(a.created_by),
-        title=a.title,
-        description=a.description,
-        subject=a.subject,
-        due_date=a.due_date,
-        attachments=a.attachments,
-        published=a.published,
-        created_at=a.created_at,
-    )
 
 
 @router.get("", response_model=List[AssignmentOut])

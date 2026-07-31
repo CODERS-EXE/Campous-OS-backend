@@ -5,6 +5,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+# pyrefly: ignore [missing-import]
 from slowapi.util import get_remote_address
 from jose import JWTError, jwt
 
