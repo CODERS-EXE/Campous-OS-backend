@@ -35,7 +35,15 @@ client: AsyncIOMotorClient | None = None
 
 async def init_db() -> None:
     global client
-    client = AsyncIOMotorClient(settings.MONGODB_URI)
+    # Add connection parameters for better reliability
+    client = AsyncIOMotorClient(
+        settings.MONGODB_URI,
+        serverSelectionTimeoutMS=30000,  # 30 seconds timeout
+        connectTimeoutMS=30000,
+        socketTimeoutMS=30000,
+        retryWrites=True,
+        retryReads=True,
+    )
     await init_beanie(
         database=client[settings.MONGODB_DB_NAME],
         document_models=[

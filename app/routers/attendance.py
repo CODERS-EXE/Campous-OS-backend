@@ -84,9 +84,50 @@ async def my_attendance(
     user: Annotated[User, Depends(get_tenant_scoped_user)],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
-    if user.role != UserRole.FACULTY.value:
+    if user.role not in (UserRole.FACULTY.value, UserRole.WARDEN.value):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only faculty can access their attendance")
     items = await get_attendance_for_faculty(college.id, user.id)
+    out = []
+    for att in items:
+        out.append(
+            AttendanceOut(
+                id=str(att.id),
+                faculty_id=str(att.faculty_id),
+                subject=att.subject,
+                date=att.date,
+                session_name=att.session_name,
+                records=[{"student_id": str(r.student_id), "status": r.status, "marked_by": str(r.marked_by) if r.marked_by else None} for r in att.records],
+                created_at=att.created_at,
+            )
+        )
+    return out
+
+
+@router.get("/student", response_model=List[AttendanceOut])
+async def student_attendance(
+    user: Annotated[User, Depends(get_tenant_scoped_user)],
+    college: Annotated[College, Depends(get_tenant_college)],
+):
+    """Return all attendance sessions for logged-in student OR parent's children."""
+    if user.role not in (UserRole.STUDENT.value, UserRole.PARENT.value):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only students or parents can access this endpoint")
+    
+    # Determine which student IDs to fetch attendance for
+    target_student_ids = []
+    if user.role == UserRole.STUDENT.value:
+        target_student_ids = [user.id]
+    elif user.role == UserRole.PARENT.value:
+        # Parent — fetch children IDs from profile
+        if user.profile and hasattr(user.profile, 'student_ids') and user.profile.student_ids:
+            target_student_ids = [PydanticObjectId(sid) for sid in user.profile.student_ids if PydanticObjectId.is_valid(sid)]
+        if not target_student_ids:
+            return []  # No children linked — return empty
+    
+    items = await Attendance.find(
+        Attendance.college_id == college.id,
+        {"records.student_id": {"$in": target_student_ids}},
+    ).sort(-Attendance.date).to_list()
+    
     out = []
     for att in items:
         out.append(

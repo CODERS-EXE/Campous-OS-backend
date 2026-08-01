@@ -615,7 +615,7 @@ async def get_my_room(
                         "email": u.email,
                         "roll_no": st.roll_no if st else "N/A",
                         "department": st.department if st else "N/A",
-                        "phone": u.profile.get("phone", "N/A")
+                        "phone": u.profile.phone or "N/A"
                     })
 
     return {
@@ -802,7 +802,7 @@ async def list_hostel_students(
         u = await User.get(student.user_id)
         if not u:
             continue
-        if hostel and u.profile.get("hostel") != hostel:
+        if hostel and u.profile.hostel != hostel:
             continue
         result.append({
             "id": str(student.id),
@@ -813,8 +813,8 @@ async def list_hostel_students(
             "department": student.department,
             "year": student.year,
             "semester": student.semester,
-            "hostel": u.profile.get("hostel"),
-            "phone": u.profile.get("phone"),
+            "hostel": u.profile.hostel,
+            "phone": u.profile.phone,
             "emergency_contact": student.emergency_contact,
             "blood_group": student.blood_group,
         })

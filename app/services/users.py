@@ -108,6 +108,17 @@ async def create_user(
             semester=semester,
         )
         await student.insert()
+
+        # Auto-assign student to all faculty of the same department (branch)
+        dept_faculty = await Faculty.find(
+            Faculty.college_id == college.id,
+            Faculty.department == department,
+        ).to_list()
+
+        for fac in dept_faculty:
+            if user.id not in fac.student_ids:
+                fac.student_ids.append(user.id)
+                await fac.save()
     elif role == UserRole.FACULTY.value:
         faculty = Faculty(
             college_id=college.id,
@@ -190,6 +201,7 @@ async def update_user(
         student = await Student.find_one(Student.user_id == user.id, Student.college_id == user.college_id)
         if not student:
             raise ValueError("Student profile not found")
+        old_department = student.department
         if roll_no is not None:
             student.roll_no = roll_no
         if department is not None:
@@ -201,6 +213,28 @@ async def update_user(
         if semester is not None:
             student.semester = semester
         await student.save()
+
+        # If department changed, re-assign to new department's faculty
+        if department is not None and department != old_department:
+            # Remove from old department faculty
+            old_faculty = await Faculty.find(
+                Faculty.college_id == user.college_id,
+                Faculty.department == old_department,
+            ).to_list()
+            for fac in old_faculty:
+                if user.id in fac.student_ids:
+                    fac.student_ids.remove(user.id)
+                    await fac.save()
+
+            # Add to new department faculty
+            new_faculty = await Faculty.find(
+                Faculty.college_id == user.college_id,
+                Faculty.department == department,
+            ).to_list()
+            for fac in new_faculty:
+                if user.id not in fac.student_ids:
+                    fac.student_ids.append(user.id)
+                    await fac.save()
     elif user.role == UserRole.FACULTY.value:
         faculty = await Faculty.find_one(Faculty.user_id == user.id, Faculty.college_id == user.college_id)
         if not faculty:
@@ -225,6 +259,12 @@ async def delete_user(user: User) -> None:
         student = await Student.find_one(Student.user_id == user.id, Student.college_id == user.college_id)
         if student:
             await student.delete()
+        # Remove student from all faculty's student_ids
+        faculty_list = await Faculty.find(Faculty.college_id == user.college_id).to_list()
+        for fac in faculty_list:
+            if user.id in fac.student_ids:
+                fac.student_ids.remove(user.id)
+                await fac.save()
     elif user.role == UserRole.FACULTY.value:
         faculty = await Faculty.find_one(Faculty.user_id == user.id, Faculty.college_id == user.college_id)
         if faculty:

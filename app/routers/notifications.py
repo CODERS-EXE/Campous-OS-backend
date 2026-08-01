@@ -19,6 +19,7 @@ from app.core.deps import (
     get_tenant_college,
     get_tenant_scoped_user,
     require_roles,
+    resolve_tenant,
 )
 from app.core.websocket_manager import manager
 from app.models.college import College
@@ -80,8 +81,8 @@ def _ws_payload(n: Notification) -> Dict[str, Any]:
 
 @router.get("", response_model=List[NotificationResponse])
 async def list_notifications(
-    user: Annotated[User, Depends(get_tenant_scoped_user)],
-    college: Annotated[College, Depends(get_tenant_college)],
+    user: Annotated[User, Depends(get_current_user)],
+    college: Annotated[Optional[College], Depends(resolve_tenant)] = None,
     unread_only: bool = Query(False),
     notification_type: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
@@ -92,7 +93,13 @@ async def list_notifications(
     limit: int = Query(50, ge=1, le=200),
 ):
     """List notifications for current user with pagination, search, and filters."""
-    query = Notification.find(Notification.college_id == college.id)
+    # Super admin can see all notifications across colleges, others see only their college
+    if user.role == UserRole.SUPER_ADMIN.value:
+        query = Notification.find()
+    else:
+        if not college:
+            raise HTTPException(status_code=400, detail="College context required")
+        query = Notification.find(Notification.college_id == college.id)
 
     if notification_type and notification_type in VALID_TYPES:
         query = query.find(Notification.type == notification_type)
@@ -166,10 +173,14 @@ async def get_notification_count(
 
 @router.get("/unread/count")
 async def get_unread_count(
-    user: Annotated[User, Depends(get_tenant_scoped_user)],
-    college: Annotated[College, Depends(get_tenant_college)],
+    user: Annotated[User, Depends(get_current_user)],
+    college: Annotated[Optional[College], Depends(resolve_tenant)] = None,
 ):
     """Get count of unread notifications (legacy compatible)."""
+    # Super admin without college context gets 0
+    if not college:
+        return {"unread_count": 0}
+    
     all_notifs = await Notification.find(Notification.college_id == college.id).to_list()
     unread_count = sum(1 for n in all_notifs if user.id not in n.read_by)
     return {"unread_count": unread_count}
@@ -352,13 +363,19 @@ async def broadcast_notification(
 @router.put("/read/{notification_id}")
 async def put_mark_read(
     notification_id: str,
-    user: Annotated[User, Depends(get_tenant_scoped_user)],
-    college: Annotated[College, Depends(get_tenant_college)],
+    user: Annotated[User, Depends(get_current_user)],
+    college: Annotated[Optional[College], Depends(resolve_tenant)] = None,
 ):
     """Mark a single notification as read (PUT)."""
     n = await Notification.get(PydanticObjectId(notification_id))
-    if not n or n.college_id != college.id:
+    if not n:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found")
+    
+    # Super admin can mark any notification, others must match college
+    if user.role != UserRole.SUPER_ADMIN.value:
+        if not college or n.college_id != college.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found")
+    
     if user.id not in n.read_by:
         n.read_by.append(user.id)
         await n.save()
@@ -368,13 +385,19 @@ async def put_mark_read(
 @router.post("/{notification_id}/read")
 async def post_mark_read(
     notification_id: str,
-    user: Annotated[User, Depends(get_tenant_scoped_user)],
-    college: Annotated[College, Depends(get_tenant_college)],
+    user: Annotated[User, Depends(get_current_user)],
+    college: Annotated[Optional[College], Depends(resolve_tenant)] = None,
 ):
     """Mark a single notification as read (POST – legacy compat)."""
     n = await Notification.get(PydanticObjectId(notification_id))
-    if not n or n.college_id != college.id:
+    if not n:
         return {"ok": False, "message": "Notification not found"}
+    
+    # Super admin can mark any notification, others must match college
+    if user.role != UserRole.SUPER_ADMIN.value:
+        if not college or n.college_id != college.id:
+            return {"ok": False, "message": "Notification not found"}
+    
     if user.id not in n.read_by:
         n.read_by.append(user.id)
         await n.save()
@@ -387,11 +410,18 @@ async def post_mark_read(
 
 @router.put("/read-all")
 async def put_mark_all_read(
-    user: Annotated[User, Depends(get_tenant_scoped_user)],
-    college: Annotated[College, Depends(get_tenant_college)],
+    user: Annotated[User, Depends(get_current_user)],
+    college: Annotated[Optional[College], Depends(resolve_tenant)] = None,
 ):
     """Mark all notifications as read (PUT)."""
-    notifications = await Notification.find(Notification.college_id == college.id).to_list()
+    # Super admin marks all across colleges, others only their college
+    if user.role == UserRole.SUPER_ADMIN.value:
+        notifications = await Notification.find().to_list()
+    else:
+        if not college:
+            raise HTTPException(status_code=400, detail="College context required")
+        notifications = await Notification.find(Notification.college_id == college.id).to_list()
+    
     count = 0
     for n in notifications:
         if user.id not in n.read_by:

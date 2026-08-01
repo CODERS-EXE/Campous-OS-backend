@@ -8,7 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel, Field
 
 from app.core.constants import UserRole
-from app.core.deps import get_current_user, get_tenant_college, require_roles
+from app.core.deps import get_current_user, get_tenant_college, require_roles, resolve_tenant
 from app.models.college import College
 from app.models.library import Book, BookCategory, BookIssue
 from app.models.user import User
@@ -514,7 +514,7 @@ async def get_my_issues(
 @router.get("/analytics")
 async def get_library_analytics(
     user: Annotated[User, Depends(get_current_user)],
-    college: Annotated[Optional[College], Depends(get_tenant_college)] = None,
+    college: Annotated[Optional[College], Depends(resolve_tenant)] = None,
 ):
     from app.models.college import College as CollegeModel
 

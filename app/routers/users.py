@@ -249,3 +249,68 @@ async def my_profile(
             avatar_url=user.profile.avatar_url,
         )
     return {"id": str(user.id), "name": user.name, "email": user.email, "role": user.role}
+
+
+@router.get("/my-children", response_model=List[StudentProfileResponse])
+async def get_my_children(
+    user: Annotated[User, Depends(get_tenant_scoped_user)],
+    college: Annotated[College, Depends(get_tenant_college)],
+):
+    """Get assigned children for a parent"""
+    if user.role != UserRole.PARENT.value:
+        raise HTTPException(status_code=403, detail="Only parents can access this endpoint")
+
+    child_ids = user.profile.student_ids or []
+    if not child_ids:
+        return []
+
+    # student_ids are stored as user_ids (strings)
+    result = []
+    for sid in child_ids:
+        try:
+            child_user = await User.get(PydanticObjectId(sid))
+            if not child_user or child_user.college_id != college.id:
+                continue
+            student = await Student.find_one(
+                Student.user_id == child_user.id,
+                Student.college_id == college.id
+            )
+            if student:
+                result.append(StudentProfileResponse(
+                    id=str(student.id),
+                    user_id=str(child_user.id),
+                    name=child_user.name,
+                    email=child_user.email,
+                    roll_no=student.roll_no,
+                    department=student.department,
+                    course=student.course,
+                    year=student.year,
+                    semester=student.semester,
+                    avatar_url=child_user.profile.avatar_url,
+                ))
+        except Exception:
+            continue
+    return result
+
+
+# Assign students to faculty
+@router.patch("/faculty/{faculty_user_id}/assign-students")
+async def assign_students_to_faculty(
+    faculty_user_id: str,
+    student_ids: List[str],
+    _: Annotated[User, Depends(require_roles(UserRole.COLLEGE_ADMIN))],
+    college: Annotated[College, Depends(get_tenant_college)],
+):
+    """Assign students to a faculty member (College Admin only)"""
+    faculty = await Faculty.find_one(
+        Faculty.user_id == PydanticObjectId(faculty_user_id),
+        Faculty.college_id == college.id
+    )
+    if not faculty:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Faculty not found")
+    
+    # Convert string IDs to PydanticObjectId
+    faculty.student_ids = [PydanticObjectId(sid) for sid in student_ids if PydanticObjectId.is_valid(sid)]
+    await faculty.save()
+    
+    return {"message": f"Assigned {len(faculty.student_ids)} students to faculty", "count": len(faculty.student_ids)}

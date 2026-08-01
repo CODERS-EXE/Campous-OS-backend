@@ -8,6 +8,7 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    hash_password,
     verify_password,
 )
 from beanie import PydanticObjectId
@@ -134,3 +135,40 @@ async def refresh(body: RefreshRequest):
 @router.get("/me", response_model=UserResponse)
 async def me(user: Annotated[User, Depends(get_current_user)]):
     return _user_response(user)
+
+
+@router.patch("/me", response_model=UserResponse)
+async def update_me(
+    body: dict,
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """Update own name. Available to all authenticated users."""
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Name cannot be empty")
+    user.name = name
+    await user.save()
+    return _user_response(user)
+
+
+@router.post("/change-password")
+async def change_password(
+    body: dict,
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """Change own password. Requires current_password + new_password."""
+    current_password = body.get("current_password", "")
+    new_password = body.get("new_password", "")
+
+    if not current_password or not new_password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Both current and new password are required")
+
+    if not verify_password(current_password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect")
+
+    if len(new_password) < 8:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="New password must be at least 8 characters")
+
+    user.password_hash = hash_password(new_password)
+    await user.save()
+    return {"ok": True, "message": "Password changed successfully"}

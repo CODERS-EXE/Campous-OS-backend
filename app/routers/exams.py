@@ -15,10 +15,13 @@ from app.models.student_exam import StudentExam
 from app.models.exam_result import ExamResult, SubjectResult
 from app.models.grade_scale import GradeScale, GradeRange
 from app.models.user import User
+from app.models.student import Student
 from app.core.deps import get_current_user
+from app.schemas.exam import ExamCreate, ExamUpdate, SubjectExamCreate, SubjectExamUpdate
 from app.services.notification_service import notify_exam_scheduled, notify_results_published
 
 router = APIRouter(prefix="/exams", tags=["exams"])
+
 
 
 # ============================================================================
@@ -94,13 +97,7 @@ async def calculate_cgpa(student_id: ObjectId, current_sgpa: float, current_cred
 
 @router.post("/", response_model=dict)
 async def create_exam(
-    name: str,
-    exam_type: str,
-    academic_year: str,
-    semester: int,
-    start_date: datetime,
-    end_date: datetime,
-    description: Optional[str] = None,
+    payload: ExamCreate,
     background_tasks: BackgroundTasks = None,
     current_user: User = Depends(get_current_user)
 ):
@@ -109,13 +106,13 @@ async def create_exam(
         raise HTTPException(status_code=403, detail="Not authorized")
     
     exam = Exam(
-        name=name,
-        exam_type=exam_type,
-        academic_year=academic_year,
-        semester=semester,
-        start_date=start_date,
-        end_date=end_date,
-        description=description,
+        name=payload.name,
+        exam_type=payload.exam_type,
+        academic_year=payload.academic_year,
+        semester=payload.semester,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        description=payload.description,
         status="scheduled",
         college_id=current_user.college_id,
         created_by=current_user.id
@@ -208,11 +205,7 @@ async def get_exam(
 @router.patch("/{exam_id}", response_model=dict)
 async def update_exam(
     exam_id: str,
-    name: Optional[str] = None,
-    status: Optional[str] = None,
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
-    description: Optional[str] = None,
+    payload: ExamUpdate,
     current_user: User = Depends(get_current_user)
 ):
     """Update exam details (College Admin only)"""
@@ -224,16 +217,16 @@ async def update_exam(
         raise HTTPException(status_code=404, detail="Exam not found")
     
     update_data = {}
-    if name is not None:
-        update_data["name"] = name
-    if status is not None:
-        update_data["status"] = status
-    if start_date is not None:
-        update_data["start_date"] = start_date
-    if end_date is not None:
-        update_data["end_date"] = end_date
-    if description is not None:
-        update_data["description"] = description
+    if payload.name is not None:
+        update_data["name"] = payload.name
+    if payload.status is not None:
+        update_data["status"] = payload.status
+    if payload.start_date is not None:
+        update_data["start_date"] = payload.start_date
+    if payload.end_date is not None:
+        update_data["end_date"] = payload.end_date
+    if payload.description is not None:
+        update_data["description"] = payload.description
     
     update_data["updated_at"] = datetime.utcnow()
     
@@ -241,12 +234,13 @@ async def update_exam(
     return {"message": "Exam updated successfully"}
 
 
+
 @router.delete("/{exam_id}", response_model=dict)
 async def delete_exam(
     exam_id: str,
     current_user: User = Depends(get_current_user)
 ):
-    """Delete exam (College Admin only)"""
+    """Delete exam and all related data (College Admin only)"""
     if current_user.role not in ["super_admin", "college_admin"]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -254,16 +248,38 @@ async def delete_exam(
     if not exam or exam.college_id != current_user.college_id:
         raise HTTPException(status_code=404, detail="Exam not found")
     
-    # Check if exam has subject exams
-    subject_exams = await SubjectExam.find(SubjectExam.exam_id == exam.id).count()
-    if subject_exams > 0:
+    # Don't allow deletion if results are published
+    if exam.results_published:
         raise HTTPException(
-            status_code=400,
-            detail="Cannot delete exam with scheduled subjects. Delete subject exams first."
+            status_code=400, 
+            detail="Cannot delete exam after results are published"
         )
     
+    # Cascade delete all related data
+    # 1. Delete all subject exams
+    subject_exams = await SubjectExam.find(SubjectExam.exam_id == exam.id).to_list()
+    for se in subject_exams:
+        await se.delete()
+    
+    # 2. Delete all student exam records (hall tickets, attendance, marks)
+    student_exams = await StudentExam.find(StudentExam.exam_id == exam.id).to_list()
+    for ste in student_exams:
+        await ste.delete()
+    
+    # 3. Delete all exam results
+    exam_results = await ExamResult.find(ExamResult.exam_id == exam.id).to_list()
+    for er in exam_results:
+        await er.delete()
+    
+    # 4. Delete the exam itself
     await exam.delete()
-    return {"message": "Exam deleted successfully"}
+    
+    return {
+        "message": "Exam and all related data deleted successfully",
+        "deleted_subjects": len(subject_exams),
+        "deleted_student_exams": len(student_exams),
+        "deleted_results": len(exam_results)
+    }
 
 
 # ============================================================================
@@ -273,19 +289,7 @@ async def delete_exam(
 @router.post("/{exam_id}/subjects", response_model=dict)
 async def schedule_subject_exam(
     exam_id: str,
-    subject_id: str,
-    subject_name: str,
-    subject_code: str,
-    exam_date: datetime,
-    start_time: str,
-    end_time: str,
-    duration_minutes: int,
-    max_marks: int,
-    passing_marks: int,
-    credits: int = 3,
-    room_numbers: List[str] = [],
-    internal_marks_weight: int = 30,
-    external_marks_weight: int = 70,
+    payload: SubjectExamCreate,
     current_user: User = Depends(get_current_user)
 ):
     """Schedule subject exam (College Admin only)"""
@@ -298,24 +302,24 @@ async def schedule_subject_exam(
     
     # Parse time strings
     from datetime import time
-    start = datetime.strptime(start_time, "%H:%M:%S").time()
-    end = datetime.strptime(end_time, "%H:%M:%S").time()
+    start = datetime.strptime(payload.start_time, "%H:%M:%S").time() if ":" in payload.start_time and len(payload.start_time) == 8 else datetime.strptime(payload.start_time, "%H:%M").time()
+    end = datetime.strptime(payload.end_time, "%H:%M:%S").time() if ":" in payload.end_time and len(payload.end_time) == 8 else datetime.strptime(payload.end_time, "%H:%M").time()
     
     subject_exam = SubjectExam(
         exam_id=exam.id,
-        subject_id=ObjectId(subject_id),
-        subject_name=subject_name,
-        subject_code=subject_code,
-        exam_date=exam_date,
+        subject_id=ObjectId(payload.subject_id) if payload.subject_id and ObjectId.is_valid(payload.subject_id) else ObjectId(),
+        subject_name=payload.subject_name,
+        subject_code=payload.subject_code,
+        exam_date=payload.exam_date,
         start_time=start,
         end_time=end,
-        duration_minutes=duration_minutes,
-        max_marks=max_marks,
-        passing_marks=passing_marks,
-        credits=credits,
-        room_numbers=room_numbers,
-        internal_marks_weight=internal_marks_weight,
-        external_marks_weight=external_marks_weight,
+        duration_minutes=payload.duration_minutes,
+        max_marks=payload.max_marks,
+        passing_marks=payload.passing_marks,
+        credits=payload.credits,
+        room_numbers=payload.room_numbers,
+        internal_marks_weight=payload.internal_marks_weight,
+        external_marks_weight=payload.external_marks_weight,
         college_id=current_user.college_id
     )
     
@@ -369,11 +373,7 @@ async def get_subject_exams(
 @router.patch("/subjects/{subject_exam_id}", response_model=dict)
 async def update_subject_exam(
     subject_exam_id: str,
-    exam_date: Optional[datetime] = None,
-    start_time: Optional[str] = None,
-    end_time: Optional[str] = None,
-    room_numbers: Optional[List[str]] = None,
-    status: Optional[str] = None,
+    payload: SubjectExamUpdate,
     current_user: User = Depends(get_current_user)
 ):
     """Update subject exam details"""
@@ -385,23 +385,61 @@ async def update_subject_exam(
         raise HTTPException(status_code=404, detail="Subject exam not found")
     
     update_data = {}
-    if exam_date:
-        update_data["exam_date"] = exam_date
-    if start_time:
-        from datetime import time
-        update_data["start_time"] = datetime.strptime(start_time, "%H:%M:%S").time()
-    if end_time:
-        from datetime import time
-        update_data["end_time"] = datetime.strptime(end_time, "%H:%M:%S").time()
-    if room_numbers is not None:
-        update_data["room_numbers"] = room_numbers
-    if status:
-        update_data["status"] = status
+    if payload.exam_date:
+        update_data["exam_date"] = payload.exam_date
+    if payload.start_time:
+        update_data["start_time"] = datetime.strptime(payload.start_time, "%H:%M:%S").time() if ":" in payload.start_time and len(payload.start_time) == 8 else datetime.strptime(payload.start_time, "%H:%M").time()
+    if payload.end_time:
+        update_data["end_time"] = datetime.strptime(payload.end_time, "%H:%M:%S").time() if ":" in payload.end_time and len(payload.end_time) == 8 else datetime.strptime(payload.end_time, "%H:%M").time()
+    if payload.room_numbers is not None:
+        update_data["room_numbers"] = payload.room_numbers
+    if payload.status:
+        update_data["status"] = payload.status
     
     update_data["updated_at"] = datetime.utcnow()
     
     await subject_exam.set(update_data)
     return {"message": "Subject exam updated successfully"}
+
+
+@router.delete("/subjects/{subject_exam_id}", response_model=dict)
+async def delete_subject_exam(
+    subject_exam_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete scheduled subject exam"""
+    if current_user.role not in ["super_admin", "college_admin"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    subject_exam = await SubjectExam.get(ObjectId(subject_exam_id))
+    if not subject_exam or subject_exam.college_id != current_user.college_id:
+        raise HTTPException(status_code=404, detail="Subject exam not found")
+    
+    # Check if marks have been entered
+    student_exams_with_marks = await StudentExam.find(
+        StudentExam.subject_exam_id == subject_exam.id,
+        StudentExam.marks_obtained != None
+    ).count()
+    
+    if student_exams_with_marks > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete subject exam. {student_exams_with_marks} students already have marks entered."
+        )
+    
+    # Delete all student exam records for this subject
+    student_exams = await StudentExam.find(StudentExam.subject_exam_id == subject_exam.id).to_list()
+    for ste in student_exams:
+        await ste.delete()
+    
+    # Delete the subject exam
+    await subject_exam.delete()
+    
+    return {
+        "message": "Subject exam deleted successfully",
+        "deleted_hall_tickets": len(student_exams)
+    }
+
 
 
 # ============================================================================
@@ -432,6 +470,15 @@ async def generate_hall_tickets(
     
     for student_id_str in student_ids:
         student_id = ObjectId(student_id_str)
+
+        # Fetch student name and roll number once per student
+        student_user = await User.get(student_id)
+        student_doc = await Student.find_one(
+            Student.user_id == student_id,
+            Student.college_id == current_user.college_id,
+        )
+        resolved_name = student_user.name if student_user else ""
+        resolved_roll = student_doc.roll_no if student_doc else ""
         
         # Generate hall ticket for each subject exam
         for subject_exam in subject_exams:
@@ -449,13 +496,13 @@ async def generate_hall_tickets(
                 str(exam.id), student_id_str, str(current_user.college_id)
             )
             
-            # Create student exam record
+            # Create student exam record with resolved student details
             student_exam = StudentExam(
                 subject_exam_id=subject_exam.id,
                 exam_id=exam.id,
                 student_id=student_id,
-                student_name="",  # Will be populated from student record
-                student_roll_number="",  # Will be populated from student record
+                student_name=resolved_name,
+                student_roll_number=resolved_roll,
                 hall_ticket_number=hall_ticket_number,
                 college_id=current_user.college_id
             )
@@ -470,6 +517,25 @@ async def generate_hall_tickets(
         "message": f"Hall tickets generated successfully",
         "count": generated_count
     }
+
+
+@router.get("/students/{student_id}/hall-ticket/latest", response_model=dict)
+async def get_latest_student_hall_ticket(
+    student_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get the latest generated hall ticket for a student"""
+    if current_user.role == "student" and str(current_user.id) != student_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    latest_student_exam = await StudentExam.find_one(
+        StudentExam.student_id == ObjectId(student_id)
+    ).sort("-id")
+    
+    if not latest_student_exam:
+        raise HTTPException(status_code=404, detail="Hall ticket not generated yet")
+    
+    return await get_student_hall_ticket(student_id=student_id, exam_id=str(latest_student_exam.exam_id), current_user=current_user)
 
 
 @router.get("/students/{student_id}/hall-ticket/{exam_id}", response_model=dict)
@@ -1136,7 +1202,7 @@ async def get_college_exam_analytics(
     if current_user.role not in ["super_admin", "college_admin"]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    query_filters = [Exam.college_id == current_user.college_id]
+    query_filters = [] if current_user.role == "super_admin" else [Exam.college_id == current_user.college_id]
     
     if academic_year:
         query_filters.append(Exam.academic_year == academic_year)
@@ -1151,7 +1217,7 @@ async def get_college_exam_analytics(
     total_students = sum(e.total_students for e in exams)
     
     # Get results statistics
-    result_query_filters = [ExamResult.college_id == current_user.college_id]
+    result_query_filters = [] if current_user.role == "super_admin" else [ExamResult.college_id == current_user.college_id]
     if academic_year:
         result_query_filters.append(ExamResult.academic_year == academic_year)
     if semester:
@@ -1318,7 +1384,7 @@ async def get_faculty_assigned_exams(
     # This is simplified - in production, you'd have a faculty assignment table
     subject_exams = await SubjectExam.find(
         SubjectExam.college_id == current_user.college_id,
-        SubjectExam.status.in_(["scheduled", "ongoing", "completed"])
+        {"status": {"$in": ["scheduled", "ongoing", "completed"]}}
     ).limit(50).to_list()
     
     return [

@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from beanie import PydanticObjectId
 
 from app.core.constants import UserRole
-from app.core.deps import get_tenant_college, get_tenant_scoped_user, require_roles
+from app.core.deps import get_current_user, get_tenant_college, get_tenant_scoped_user, require_roles, resolve_tenant
 from app.core.websocket_manager import manager
 from app.models.college import College
 from app.models.user import User
@@ -581,6 +581,12 @@ async def update_application_status(
         drive.selected_count += 1
     await drive.save()
     
+    # Resolve the student's User ID once for all notification targets in this function
+    student_doc = await Student.get(application.student_id)
+    notif_target_user_id = (
+        str(student_doc.user_id) if student_doc else str(application.student_id)
+    )
+
     # Send targeted notification for "selected" status via notification service
     if new_status == "selected":
         company = await Company.get(drive.company_id)
@@ -588,7 +594,7 @@ async def update_application_status(
         background_tasks.add_task(
             notify_placement_selected,
             college_id=college.id,
-            student_user_id=str(application.student_id),
+            student_user_id=notif_target_user_id,
             company_name=company_name,
             role_name=drive.role,
             application_id=str(application.id),
@@ -611,7 +617,7 @@ async def update_application_status(
                 "action_url": "/student/placement-applications",
             },
             target_scope="user",
-            target_user_id=str(application.student_id),
+            target_user_id=notif_target_user_id,
             college_id=str(college.id)
         )
 
@@ -730,6 +736,7 @@ async def schedule_interview(
     await application.save()
     
     # Send notification to student
+    student_doc = await Student.get(application.student_id)
     await manager.send_notification(
         notification_data={
             "id": str(interview.id),
@@ -740,7 +747,7 @@ async def schedule_interview(
             "action_url": "/student/applications",
         },
         target_scope="user",
-        target_user_id=str(application.student_id),
+        target_user_id=str(student_doc.user_id) if student_doc else str(application.student_id),
         college_id=str(college.id)
     )
     
@@ -863,6 +870,7 @@ async def create_offer(
     await application.save()
     
     # Send notification
+    student_doc = await Student.get(application.student_id)
     await manager.send_notification(
         notification_data={
             "id": str(offer.id),
@@ -873,7 +881,7 @@ async def create_offer(
             "action_url": "/student/applications",
         },
         target_scope="user",
-        target_user_id=str(application.student_id),
+        target_user_id=str(student_doc.user_id) if student_doc else str(application.student_id),
         college_id=str(college.id)
     )
     
@@ -933,10 +941,40 @@ async def reject_offer(
 
 @router.get("/analytics/stats")
 async def get_placement_stats(
-    user: Annotated[User, Depends(get_tenant_scoped_user)],
-    college: Annotated[College, Depends(get_tenant_college)],
+    user: Annotated[User, Depends(get_current_user)],
+    college: Annotated[Optional[College], Depends(resolve_tenant)] = None,
 ):
-    """Get placement statistics for the college"""
+    """Get placement statistics for the college or all colleges (super admin)"""
+    from app.models.college import College as CollegeModel
+    
+    if user.role == UserRole.SUPER_ADMIN.value:
+        # Super admin — aggregate across all colleges
+        colleges = await CollegeModel.find_all().to_list()
+        total_companies = await Company.find({"is_active": True}).count()
+        total_drives = await PlacementDrive.find({}).count()
+        active_drives = await PlacementDrive.find({"status": "open"}).count()
+        total_applications = await StudentApplication.find({}).count()
+        placed_count = await StudentApplication.find({"status": "placed"}).count()
+        
+        # Highest package across all colleges
+        all_apps = await StudentApplication.find({}).to_list()
+        packages = [app.offered_package for app in all_apps if app.offered_package and app.offered_package > 0]
+        highest_package = max(packages) if packages else 0
+        avg_package = sum(packages) / len(packages) if packages else 0
+        
+        return {
+            "total_companies": total_companies,
+            "total_drives": total_drives,
+            "active_drives": active_drives,
+            "total_applications": total_applications,
+            "placed_students": placed_count,
+            "highest_package": highest_package,
+            "average_package": round(avg_package, 2),
+        }
+    
+    # College admin/faculty — specific college
+    if not college:
+        raise HTTPException(status_code=400, detail="College context required")
     
     # Total companies
     total_companies = await Company.find({"college_id": college.id, "is_active": True}).count()

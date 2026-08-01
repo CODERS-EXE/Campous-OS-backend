@@ -14,7 +14,7 @@ from jose import JWTError, jwt
 from app.core.config import get_settings
 from app.core.websocket_manager import manager
 from app.db.mongo import close_db, init_db
-from app.routers import ai, assignments, attendance, auth, bus, colleges, exams, fees, hostel, library, notifications, placements, results, timetable, users
+from app.routers import ai, assignments, attendance, auth, bus, colleges, exams, fees, hostel, library, notifications, placements, results, timetable, users, search
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,7 @@ app.include_router(fees.router, prefix="/api/v1")
 app.include_router(library.router, prefix="/api/v1")
 app.include_router(placements.router, prefix="/api/v1")
 app.include_router(exams.router, prefix="/api/v1")
+app.include_router(search.router, prefix="/api/v1")
 
 
 @app.get("/health")
@@ -84,16 +85,20 @@ async def root():
     return {"message": "CampusOS API", "docs": "/docs"}
 
 
+# pyrefly: ignore [missing-import]
+from beanie import PydanticObjectId
+
 async def get_user_from_token(token: str) -> User:
     """Validate JWT token and return user"""
     try:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         user_id: str = payload.get("sub")
-        if user_id is None:
+        if not user_id or not PydanticObjectId.is_valid(user_id):
             return None
-        user = await User.get(user_id)
+        user = await User.get(PydanticObjectId(user_id))
         return user
-    except JWTError:
+    except Exception as exc:
+        logger.warning(f"Failed to authenticate WebSocket token: {exc}")
         return None
 
 
@@ -106,28 +111,16 @@ async def websocket_endpoint(
     """
     WebSocket endpoint for real-time notifications
     Requires JWT token in query parameter: /ws/{user_id}?token=<jwt_token>
-    
-    Connection flow:
-    1. Client connects with user_id and JWT token
-    2. Server validates token and authenticates user
-    3. Connection is added to manager with role and college info
-    4. Server sends connection confirmation
-    5. Client receives real-time notifications
-    6. On disconnect, connection is cleaned up
-    
-    Message format:
-    {
-        "type": "notification|connection|heartbeat",
-        "data": {...notification data...}
-    }
     """
     # Authenticate user with JWT token
     user = await get_user_from_token(token)
     
     if not user or str(user.id) != user_id:
+        await websocket.accept()
         await websocket.close(code=1008, reason="Unauthorized")
         logger.warning(f"WebSocket authentication failed for user_id={user_id}")
         return
+
     
     # Get user details for connection
     role = user.role

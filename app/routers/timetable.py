@@ -62,3 +62,52 @@ async def get_faculty_timetable(faculty_id: str, user: Annotated[User, Depends(g
         )
         for e in items
     ]
+
+@router.get("/student", response_model=List[TimetableOut])
+async def get_student_timetable(
+    user: Annotated[User, Depends(get_tenant_scoped_user)],
+    college: Annotated[College, Depends(get_tenant_college)],
+):
+    """Get timetable for logged-in student (all entries in same college)"""
+    from app.models.student import Student as StudentModel
+    from app.models.faculty import Faculty
+
+    allowed = (UserRole.STUDENT.value, UserRole.PARENT.value, UserRole.COLLEGE_ADMIN.value, UserRole.SUPER_ADMIN.value)
+    if user.role not in allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+    # For students: fetch timetable for their department
+    if user.role == UserRole.STUDENT.value:
+        student = await StudentModel.find_one(StudentModel.user_id == user.id, StudentModel.college_id == college.id)
+        if not student:
+            return []
+        # Get all faculty in same department
+        dept_faculty = await Faculty.find(
+            Faculty.college_id == college.id,
+            Faculty.department == student.department,
+        ).to_list()
+        faculty_ids = [f.user_id for f in dept_faculty]
+        if not faculty_ids:
+            return []
+        items = await TimetableEntry.find(
+            TimetableEntry.college_id == college.id,
+            {"faculty_id": {"$in": faculty_ids}}
+        ).sort(TimetableEntry.day_of_week).to_list()
+    else:
+        # Admin/Parent: return all college timetable entries
+        items = await TimetableEntry.find(
+            TimetableEntry.college_id == college.id
+        ).sort(TimetableEntry.day_of_week).to_list()
+
+    return [
+        TimetableOut(
+            id=str(e.id),
+            faculty_id=str(e.faculty_id),
+            subject=e.subject,
+            classroom=e.classroom,
+            day_of_week=e.day_of_week,
+            start_time=e.start_time,
+            end_time=e.end_time,
+        )
+        for e in items
+    ]
