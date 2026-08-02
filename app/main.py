@@ -106,7 +106,7 @@ async def seed_database():
         role=UserRole.SUPER_ADMIN.value,
         name="Platform Admin",
         email="admin@campusos.com",
-        password_hash=hash_password("Admin@123"),
+        password_hash=hash_password("admin123"),
         is_verified=True,
     )
     await super_admin.insert()
@@ -178,7 +178,7 @@ async def seed_database():
     return {
         "message": "Database seeded successfully",
         "accounts": {
-            "super_admin": "admin@campusos.com / Admin@123",
+            "super_admin": "admin@campusos.com / admin123",
             "college_admin": "admin@demo.edu / Demo@123",
             "student": "alice@demo.edu / Demo@123",
             "faculty": "bob@demo.edu / Demo@123"
