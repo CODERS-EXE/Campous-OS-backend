@@ -80,6 +80,26 @@ async def health():
     return {"status": "ok", "app": settings.APP_NAME, "version": settings.APP_VERSION}
 
 
+@app.get("/api/v1/debug/test-db")
+async def test_db():
+    """Debug endpoint to test database connection"""
+    try:
+        from app.models.user import User
+        count = await User.count()
+        users = await User.find().limit(5).to_list()
+        return {
+            "db_connected": True,
+            "user_count": count,
+            "sample_emails": [u.email for u in users]
+        }
+    except Exception as e:
+        return {
+            "db_connected": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
 @app.get("/")
 async def root():
     return {"message": "CampusOS API", "docs": "/docs"}
