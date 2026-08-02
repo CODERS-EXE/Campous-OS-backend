@@ -85,6 +85,107 @@ async def root():
     return {"message": "CampusOS API", "docs": "/docs"}
 
 
+@app.post("/api/v1/setup/seed")
+async def seed_database():
+    """One-time setup endpoint to seed database with super admin and demo data"""
+    from app.models.user import User
+    from app.models.college import College
+    from app.models.student import Student
+    from app.models.faculty import Faculty
+    from app.models.notification import Notification, NotificationTarget
+    from app.core.security import hash_password
+    from app.core.constants import UserRole
+    
+    # Check if super admin exists
+    super_admin = await User.find_one(User.email == "admin@campusos.com")
+    if super_admin:
+        return {"message": "Database already seeded", "status": "skipped"}
+    
+    # Create super admin
+    super_admin = User(
+        role=UserRole.SUPER_ADMIN.value,
+        name="Platform Admin",
+        email="admin@campusos.com",
+        password_hash=hash_password("Admin@123"),
+        is_verified=True,
+    )
+    await super_admin.insert()
+    
+    # Create demo college
+    college = College(name="Demo University", subdomain="demo", theme_color="#2563eb")
+    await college.insert()
+    
+    # College admin
+    college_admin = User(
+        college_id=college.id,
+        role=UserRole.COLLEGE_ADMIN.value,
+        name="Demo Admin",
+        email="admin@demo.edu",
+        password_hash=hash_password("Demo@123"),
+        is_verified=True,
+    )
+    await college_admin.insert()
+    
+    # Student
+    student_user = User(
+        college_id=college.id,
+        role=UserRole.STUDENT.value,
+        name="Alice Student",
+        email="alice@demo.edu",
+        password_hash=hash_password("Demo@123"),
+        is_verified=True,
+    )
+    await student_user.insert()
+    student = Student(
+        college_id=college.id,
+        user_id=student_user.id,
+        roll_no="CS2024001",
+        department="Computer Science",
+        year=2,
+        semester=3,
+    )
+    await student.insert()
+    
+    # Faculty
+    faculty_user = User(
+        college_id=college.id,
+        role=UserRole.FACULTY.value,
+        name="Dr. Bob Faculty",
+        email="bob@demo.edu",
+        password_hash=hash_password("Demo@123"),
+        is_verified=True,
+    )
+    await faculty_user.insert()
+    faculty = Faculty(
+        college_id=college.id,
+        user_id=faculty_user.id,
+        department="Computer Science",
+        subjects=["Data Structures", "Algorithms"],
+    )
+    await faculty.insert()
+    
+    # Welcome notification
+    notification = Notification(
+        college_id=college.id,
+        target=NotificationTarget(scope="all"),
+        title="Welcome to CampusOS!",
+        body="Your smart campus platform is ready. Explore your dashboard to get started.",
+        priority="normal",
+        created_by=college_admin.id,
+    )
+    await notification.insert()
+    
+    return {
+        "message": "Database seeded successfully",
+        "accounts": {
+            "super_admin": "admin@campusos.com / Admin@123",
+            "college_admin": "admin@demo.edu / Demo@123",
+            "student": "alice@demo.edu / Demo@123",
+            "faculty": "bob@demo.edu / Demo@123"
+        }
+    }
+
+
 # pyrefly: ignore [missing-import]
 from beanie import PydanticObjectId
 
