@@ -74,7 +74,69 @@ async def list_assignments_endpoint(
     limit: int = 100,
     skip: int = 0,
 ):
-    items = await list_assignments(college.id, user.id if user.role==UserRole.FACULTY.value else None, limit=limit, skip=skip)
+    # Faculty sees their own assignments
+    # Students see published assignments from their assigned faculty
+    # Admin sees all assignments
+    
+    if user.role == UserRole.STUDENT.value:
+        # Student should see only published assignments from faculty who have them assigned
+        student = await Student.find_one(Student.user_id == user.id, Student.college_id == college.id)
+        if not student:
+            return []
+        
+        # Find all faculty who have this student assigned
+        all_faculty = await Faculty.find(Faculty.college_id == college.id).to_list()
+        faculty_list = [f for f in all_faculty if user.id in f.student_ids]
+        
+        if not faculty_list:
+            return []
+        
+        faculty_user_ids = [f.user_id for f in faculty_list]
+        
+        # Get published assignments ONLY from faculty assigned to this student
+        from beanie.operators import In as BeanieIn
+        items = await Assignment.find(
+            Assignment.college_id == college.id,
+            Assignment.published == True,
+            BeanieIn(Assignment.created_by, faculty_user_ids)
+        ).sort(-Assignment.created_at).skip(skip).limit(limit).to_list()
+        
+    elif user.role == UserRole.FACULTY.value:
+        # Faculty sees their own assignments
+        items = await list_assignments(college.id, user.id, limit=limit, skip=skip)
+        
+    elif user.role == UserRole.PARENT.value:
+        # Parent sees published assignments for their children
+        child_ids = user.profile.student_ids or []
+        if not child_ids:
+            return []
+        
+        child_user_ids = [PydanticObjectId(sid) for sid in child_ids if PydanticObjectId.is_valid(sid)]
+        
+        # Find faculty who have these children assigned
+        all_faculty = await Faculty.find(
+            Faculty.college_id == college.id,
+        ).to_list()
+        
+        # Filter faculty who have any of the children assigned
+        faculty_list = [f for f in all_faculty if any(cid in f.student_ids for cid in child_user_ids)]
+        
+        if not faculty_list:
+            return []
+        
+        faculty_ids = [f.user_id for f in faculty_list]
+        
+        # Get published assignments
+        from beanie.operators import In as BeanieIn
+        items = await Assignment.find(
+            Assignment.college_id == college.id,
+            Assignment.published == True,
+            BeanieIn(Assignment.created_by, faculty_ids)
+        ).sort(-Assignment.created_at).skip(skip).limit(limit).to_list()
+    else:
+        # Admin sees all
+        items = await list_assignments(college.id, None, limit=limit, skip=skip)
+    
     return [
         AssignmentOut(
             id=str(a.id),
@@ -166,13 +228,31 @@ async def my_submissions(
     limit: int = 100,
     skip: int = 0,
 ):
-    if user.role != UserRole.STUDENT.value:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only students can access my-submissions")
+    """Get submissions for logged-in student OR parent's children"""
     from app.models.submission import Submission
-    subs = await Submission.find(
-        Submission.college_id == college.id,
-        Submission.student_id == user.id
-    ).skip(skip).limit(limit).to_list()
+    
+    if user.role == UserRole.STUDENT.value:
+        # Student sees their own submissions
+        subs = await Submission.find(
+            Submission.college_id == college.id,
+            Submission.student_id == user.id
+        ).skip(skip).limit(limit).to_list()
+        
+    elif user.role == UserRole.PARENT.value:
+        # Parent sees children's submissions
+        child_ids = user.profile.student_ids or []
+        if not child_ids:
+            return []
+        
+        child_user_ids = [PydanticObjectId(sid) for sid in child_ids if PydanticObjectId.is_valid(sid)]
+        
+        subs = await Submission.find(
+            Submission.college_id == college.id,
+            Submission.student_id.in_(child_user_ids)
+        ).skip(skip).limit(limit).to_list()
+    else:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only students or parents can access this endpoint")
+    
     return [
         SubmissionOut(
             id=str(s.id),
@@ -215,3 +295,50 @@ async def list_submissions(assignment_id: str, user: Annotated[User, Depends(get
         )
         for s in subs
     ]
+
+
+@router.patch("/submissions/{submission_id}/grade", response_model=SubmissionOut)
+async def grade_submission(
+    submission_id: str,
+    marks: float,
+    user: Annotated[User, Depends(get_tenant_scoped_user)],
+    college: Annotated[College, Depends(get_tenant_college)],
+):
+    """Award marks/grade to a submission (Faculty or Admin only)"""
+    if user.role not in (UserRole.FACULTY.value, UserRole.COLLEGE_ADMIN.value):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+    from app.models.submission import Submission
+    submission = await Submission.get(PydanticObjectId(submission_id))
+    if not submission or submission.college_id != college.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Submission not found")
+
+    # If faculty, verify they created the assignment and student is assigned
+    if user.role == UserRole.FACULTY.value:
+        faculty_doc = await Faculty.find_one(Faculty.user_id == user.id, Faculty.college_id == college.id)
+        if not faculty_doc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Faculty mapping not found")
+        
+        # Check if student is assigned
+        if submission.student_id not in faculty_doc.student_ids:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Student not assigned to this faculty")
+        
+        # Check if assignment was created by this faculty
+        assignment = await Assignment.get(submission.assignment_id)
+        if not assignment or assignment.created_by != user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot grade submission for another faculty's assignment")
+
+    # Award marks
+    submission.marks_awarded = marks
+    from app.core.deps import utcnow
+    submission.updated_at = utcnow()
+    await submission.save()
+
+    return SubmissionOut(
+        id=str(submission.id),
+        assignment_id=str(submission.assignment_id),
+        student_id=str(submission.student_id),
+        files=submission.files,
+        submitted_at=submission.submitted_at,
+        marks_awarded=submission.marks_awarded,
+    )

@@ -161,14 +161,14 @@ async def get_exams(
             "exam_type": exam.exam_type,
             "academic_year": exam.academic_year,
             "semester": exam.semester,
-            "start_date": exam.start_date.isoformat(),
-            "end_date": exam.end_date.isoformat(),
+            "start_date": exam.start_date,
+            "end_date": exam.end_date,
             "status": exam.status,
             "description": exam.description,
             "total_subjects": exam.total_subjects,
             "total_students": exam.total_students,
             "results_published": exam.results_published,
-            "created_at": exam.created_at.isoformat()
+            "created_at": exam.created_at
         }
         for exam in exams
     ]
@@ -190,15 +190,15 @@ async def get_exam(
         "exam_type": exam.exam_type,
         "academic_year": exam.academic_year,
         "semester": exam.semester,
-        "start_date": exam.start_date.isoformat(),
-        "end_date": exam.end_date.isoformat(),
+        "start_date": exam.start_date,
+        "end_date": exam.end_date,
         "status": exam.status,
         "description": exam.description,
         "total_subjects": exam.total_subjects,
         "total_students": exam.total_students,
         "results_published": exam.results_published,
-        "published_at": exam.published_at.isoformat() if exam.published_at else None,
-        "created_at": exam.created_at.isoformat()
+        "published_at": exam.published_at if exam.published_at else None,
+        "created_at": exam.created_at
     }
 
 
@@ -300,19 +300,32 @@ async def schedule_subject_exam(
     if not exam or exam.college_id != current_user.college_id:
         raise HTTPException(status_code=404, detail="Exam not found")
     
-    # Parse time strings
-    from datetime import time
-    start = datetime.strptime(payload.start_time, "%H:%M:%S").time() if ":" in payload.start_time and len(payload.start_time) == 8 else datetime.strptime(payload.start_time, "%H:%M").time()
-    end = datetime.strptime(payload.end_time, "%H:%M:%S").time() if ":" in payload.end_time and len(payload.end_time) == 8 else datetime.strptime(payload.end_time, "%H:%M").time()
-    
+    # Parse and store time as HH:MM string
+    def norm_time(t: str) -> str:
+        t = t.strip()
+        return t[:5] if len(t) == 8 else t   # HH:MM:SS → HH:MM
+
+    # Resolve faculty_id: accept explicit or auto-match by subject_name
+    resolved_faculty_id = None
+    if payload.faculty_id and ObjectId.is_valid(payload.faculty_id):
+        resolved_faculty_id = ObjectId(payload.faculty_id)
+    else:
+        from app.models.faculty import Faculty as FacultyModel
+        matched = await FacultyModel.find_one(
+            FacultyModel.college_id == current_user.college_id,
+            {"subjects": payload.subject_name}
+        )
+        if matched:
+            resolved_faculty_id = matched.user_id
+
     subject_exam = SubjectExam(
         exam_id=exam.id,
         subject_id=ObjectId(payload.subject_id) if payload.subject_id and ObjectId.is_valid(payload.subject_id) else ObjectId(),
         subject_name=payload.subject_name,
         subject_code=payload.subject_code,
         exam_date=payload.exam_date,
-        start_time=start,
-        end_time=end,
+        start_time=norm_time(payload.start_time),
+        end_time=norm_time(payload.end_time),
         duration_minutes=payload.duration_minutes,
         max_marks=payload.max_marks,
         passing_marks=payload.passing_marks,
@@ -320,7 +333,11 @@ async def schedule_subject_exam(
         room_numbers=payload.room_numbers,
         internal_marks_weight=payload.internal_marks_weight,
         external_marks_weight=payload.external_marks_weight,
-        college_id=current_user.college_id
+        college_id=current_user.college_id,
+        faculty_id=resolved_faculty_id,
+        department=payload.department,
+        year=payload.year,
+        target_semester=payload.target_semester,
     )
     
     await subject_exam.insert()
@@ -351,9 +368,9 @@ async def get_subject_exams(
             "subject_id": str(se.subject_id),
             "subject_name": se.subject_name,
             "subject_code": se.subject_code,
-            "exam_date": se.exam_date.isoformat(),
-            "start_time": se.start_time.isoformat(),
-            "end_time": se.end_time.isoformat(),
+            "exam_date": se.exam_date,
+            "start_time": se.start_time,
+            "end_time": se.end_time,
             "duration_minutes": se.duration_minutes,
             "max_marks": se.max_marks,
             "passing_marks": se.passing_marks,
@@ -362,6 +379,10 @@ async def get_subject_exams(
             "internal_marks_weight": se.internal_marks_weight,
             "external_marks_weight": se.external_marks_weight,
             "status": se.status,
+            "faculty_id": str(se.faculty_id) if se.faculty_id else None,
+            "department": se.department,
+            "year": se.year,
+            "target_semester": se.target_semester,
             "enrolled_students": se.enrolled_students,
             "appeared_students": se.appeared_students,
             "passed_students": se.passed_students
@@ -388,16 +409,26 @@ async def update_subject_exam(
     if payload.exam_date:
         update_data["exam_date"] = payload.exam_date
     if payload.start_time:
-        update_data["start_time"] = datetime.strptime(payload.start_time, "%H:%M:%S").time() if ":" in payload.start_time and len(payload.start_time) == 8 else datetime.strptime(payload.start_time, "%H:%M").time()
+        t = payload.start_time.strip()
+        update_data["start_time"] = t[:5] if len(t) == 8 else t
     if payload.end_time:
-        update_data["end_time"] = datetime.strptime(payload.end_time, "%H:%M:%S").time() if ":" in payload.end_time and len(payload.end_time) == 8 else datetime.strptime(payload.end_time, "%H:%M").time()
+        t = payload.end_time.strip()
+        update_data["end_time"] = t[:5] if len(t) == 8 else t
     if payload.room_numbers is not None:
         update_data["room_numbers"] = payload.room_numbers
     if payload.status:
         update_data["status"] = payload.status
-    
+    if payload.faculty_id is not None:
+        update_data["faculty_id"] = ObjectId(payload.faculty_id) if payload.faculty_id and ObjectId.is_valid(payload.faculty_id) else None
+    if payload.department is not None:
+        update_data["department"] = payload.department
+    if payload.year is not None:
+        update_data["year"] = payload.year
+    if payload.target_semester is not None:
+        update_data["target_semester"] = payload.target_semester
+
     update_data["updated_at"] = datetime.utcnow()
-    
+
     await subject_exam.set(update_data)
     return {"message": "Subject exam updated successfully"}
 
@@ -418,7 +449,7 @@ async def delete_subject_exam(
     # Check if marks have been entered
     student_exams_with_marks = await StudentExam.find(
         StudentExam.subject_exam_id == subject_exam.id,
-        StudentExam.marks_obtained != None
+        StudentExam.total_marks != None
     ).count()
     
     if student_exams_with_marks > 0:
@@ -467,21 +498,42 @@ async def generate_hall_tickets(
         raise HTTPException(status_code=400, detail="No subjects scheduled for this exam")
     
     generated_count = 0
+
+    # If no student_ids passed, auto-enroll all students matching the exam's semester
+    if not student_ids:
+        from app.models.student import Student as StudentModel
+        matched_students = await StudentModel.find(
+            StudentModel.college_id == current_user.college_id,
+            StudentModel.semester == exam.semester,
+        ).to_list()
+        student_ids = [str(s.user_id) for s in matched_students]
     
     for student_id_str in student_ids:
         student_id = ObjectId(student_id_str)
 
         # Fetch student name and roll number once per student
         student_user = await User.get(student_id)
-        student_doc = await Student.find_one(
-            Student.user_id == student_id,
-            Student.college_id == current_user.college_id,
+        from app.models.student import Student as StudentModel
+        student_doc = await StudentModel.find_one(
+            StudentModel.user_id == student_id,
+            StudentModel.college_id == current_user.college_id,
         )
         resolved_name = student_user.name if student_user else ""
         resolved_roll = student_doc.roll_no if student_doc else ""
         
         # Generate hall ticket for each subject exam
         for subject_exam in subject_exams:
+            # If subject_exam has department/year/semester scope, filter students
+            if subject_exam.department and student_doc:
+                if student_doc.department != subject_exam.department:
+                    continue
+            if subject_exam.year and student_doc:
+                if student_doc.year != subject_exam.year:
+                    continue
+            if subject_exam.target_semester and student_doc:
+                if student_doc.semester != subject_exam.target_semester:
+                    continue
+
             # Check if hall ticket already exists
             existing = await StudentExam.find_one(
                 StudentExam.subject_exam_id == subject_exam.id,
@@ -512,6 +564,10 @@ async def generate_hall_tickets(
             
             # Update subject exam enrolled count
             await subject_exam.inc({SubjectExam.enrolled_students: 1})
+
+    # Update exam total_students count
+    unique_students = await StudentExam.find(StudentExam.exam_id == exam.id).distinct("student_id")
+    await exam.set({"total_students": len(unique_students), "updated_at": datetime.utcnow()})
     
     return {
         "message": f"Hall tickets generated successfully",
@@ -576,9 +632,9 @@ async def get_student_hall_ticket(
             subjects.append({
                 "subject_name": subject_exam.subject_name,
                 "subject_code": subject_exam.subject_code,
-                "exam_date": subject_exam.exam_date.isoformat(),
-                "start_time": subject_exam.start_time.isoformat(),
-                "end_time": subject_exam.end_time.isoformat(),
+                "exam_date": subject_exam.exam_date,
+                "start_time": subject_exam.start_time,
+                "end_time": subject_exam.end_time,
                 "room_number": student_exam.room_number,
                 "seat_number": student_exam.seat_number
             })
@@ -691,10 +747,26 @@ async def enter_marks(
     if not student_exam or student_exam.college_id != current_user.college_id:
         raise HTTPException(status_code=404, detail="Student exam not found")
     
-    # Get subject exam for max marks validation
+    # Get subject exam for max marks validation + faculty isolation
     subject_exam = await SubjectExam.get(student_exam.subject_exam_id)
     if not subject_exam:
         raise HTTPException(status_code=404, detail="Subject exam not found")
+
+    # Faculty isolation: only the assigned faculty may enter marks
+    if current_user.role == "faculty":
+        if subject_exam.faculty_id and subject_exam.faculty_id != current_user.id:
+            raise HTTPException(status_code=403, detail="You are not assigned to enter marks for this subject")
+        # Also verify via Faculty.subjects as a fallback
+        from app.models.faculty import Faculty as FacultyModel
+        faculty_doc = await FacultyModel.find_one(
+            FacultyModel.user_id == current_user.id,
+            FacultyModel.college_id == current_user.college_id
+        )
+        if faculty_doc and subject_exam.subject_name not in faculty_doc.subjects:
+            raise HTTPException(status_code=403, detail="This subject is not assigned to you")
+        # Verify the student is assigned to this faculty
+        if faculty_doc and student_exam.student_id not in faculty_doc.student_ids:
+            raise HTTPException(status_code=403, detail="This student is not assigned to you")
     
     update_data = {"updated_at": datetime.utcnow()}
     
@@ -723,18 +795,40 @@ async def enter_marks(
     total_marks = current_internal + current_external
     
     update_data["total_marks"] = total_marks
+
+    # Percentage for grade calculation (out of max_marks)
+    pct = (total_marks / subject_exam.max_marks * 100) if subject_exam.max_marks > 0 else 0
     
-    # Calculate grade
+    # Calculate grade - use grade scale if available, else simple fallback
     grade_scale = await GradeScale.find_one(
         GradeScale.college_id == current_user.college_id,
         GradeScale.is_active == True
     )
     
     if grade_scale:
-        grade, grade_points = await calculate_grade(total_marks, grade_scale)
+        grade, grade_points = await calculate_grade(pct, grade_scale)
         update_data["grade"] = grade
         update_data["grade_points"] = grade_points
         update_data["result_status"] = "pass" if grade_points >= grade_scale.passing_grade_points else "fail"
+    else:
+        # Fallback: simple percentage-based grading
+        if pct >= 90:
+            grade, grade_points = "A+", 10.0
+        elif pct >= 80:
+            grade, grade_points = "A", 9.0
+        elif pct >= 70:
+            grade, grade_points = "B+", 8.0
+        elif pct >= 60:
+            grade, grade_points = "B", 7.0
+        elif pct >= 50:
+            grade, grade_points = "C", 6.0
+        elif pct >= 40:
+            grade, grade_points = "D", 5.0
+        else:
+            grade, grade_points = "F", 0.0
+        update_data["grade"] = grade
+        update_data["grade_points"] = grade_points
+        update_data["result_status"] = "pass" if grade_points >= 5.0 else "fail"
     
     await student_exam.set(update_data)
     
@@ -754,15 +848,33 @@ async def bulk_upload_marks(
     subject_exam = await SubjectExam.get(ObjectId(subject_exam_id))
     if not subject_exam or subject_exam.college_id != current_user.college_id:
         raise HTTPException(status_code=404, detail="Subject exam not found")
+
+    # Faculty isolation
+    if current_user.role == "faculty":
+        if subject_exam.faculty_id and subject_exam.faculty_id != current_user.id:
+            raise HTTPException(status_code=403, detail="You are not assigned to this subject exam")
+        from app.models.faculty import Faculty as FacultyModel
+        faculty_doc = await FacultyModel.find_one(
+            FacultyModel.user_id == current_user.id,
+            FacultyModel.college_id == current_user.college_id
+        )
+        if faculty_doc and subject_exam.subject_name not in faculty_doc.subjects:
+            raise HTTPException(status_code=403, detail="This subject is not assigned to you")
     
-    # Get grade scale
+    # Get grade scale (optional - fallback if missing)
     grade_scale = await GradeScale.find_one(
         GradeScale.college_id == current_user.college_id,
         GradeScale.is_active == True
     )
-    
-    if not grade_scale:
-        raise HTTPException(status_code=400, detail="No active grade scale found")
+
+    def simple_grade(pct: float):
+        if pct >= 90: return "A+", 10.0
+        if pct >= 80: return "A",  9.0
+        if pct >= 70: return "B+", 8.0
+        if pct >= 60: return "B",  7.0
+        if pct >= 50: return "C",  6.0
+        if pct >= 40: return "D",  5.0
+        return "F", 0.0
     
     updated_count = 0
     passed_count = 0
@@ -771,13 +883,23 @@ async def bulk_upload_marks(
         student_exam = await StudentExam.get(ObjectId(item["student_exam_id"]))
         if not student_exam or student_exam.subject_exam_id != subject_exam.id:
             continue
+
+        # Faculty isolation per student
+        if current_user.role == "faculty" and faculty_doc:
+            if student_exam.student_id not in faculty_doc.student_ids:
+                continue  # Skip students not assigned to this faculty
         
-        internal_marks = item.get("internal_marks", 0)
-        external_marks = item.get("external_marks", 0)
+        internal_marks = float(item.get("internal_marks") or 0)
+        external_marks = float(item.get("external_marks") or 0)
         total_marks = internal_marks + external_marks
+        pct = (total_marks / subject_exam.max_marks * 100) if subject_exam.max_marks > 0 else 0
         
-        grade, grade_points = await calculate_grade(total_marks, grade_scale)
-        result_status = "pass" if grade_points >= grade_scale.passing_grade_points else "fail"
+        if grade_scale:
+            grade, grade_points = await calculate_grade(pct, grade_scale)
+            result_status = "pass" if grade_points >= grade_scale.passing_grade_points else "fail"
+        else:
+            grade, grade_points = simple_grade(pct)
+            result_status = "pass" if grade_points >= 5.0 else "fail"
         
         await student_exam.set({
             "internal_marks": internal_marks,
@@ -796,6 +918,22 @@ async def bulk_upload_marks(
         updated_count += 1
         if result_status == "pass":
             passed_count += 1
+    
+    # Update subject exam statistics
+    await subject_exam.set({
+        "passed_students": passed_count,
+        "updated_at": datetime.utcnow()
+    })
+    
+    return {
+        "message": "Marks uploaded successfully",
+        "updated_count": updated_count,
+        "passed_count": passed_count
+    }
+
+
+# ============================================================================
+# RESULT CALCULATION AND PUBLISHING
     
     # Update subject exam statistics
     await subject_exam.set({
@@ -901,7 +1039,7 @@ async def calculate_exam_results(
         if existing_result:
             # Update existing result
             await existing_result.set({
-                "subjects": [s.dict() for s in data["subjects"]],
+                "subjects": [s.model_dump() for s in data["subjects"]],
                 "total_subjects": total_subjects,
                 "subjects_passed": subjects_passed,
                 "subjects_failed": subjects_failed,
@@ -916,6 +1054,14 @@ async def calculate_exam_results(
                 "updated_at": datetime.utcnow()
             })
         else:
+            # Populate branch from student record
+            from app.models.student import Student as StudentModel
+            s_doc = await StudentModel.find_one(
+                StudentModel.user_id == ObjectId(student_id),
+                StudentModel.college_id == current_user.college_id
+            )
+            branch = s_doc.department if s_doc else ""
+
             # Create new result
             result = ExamResult(
                 exam_id=exam.id,
@@ -924,7 +1070,7 @@ async def calculate_exam_results(
                 student_roll_number=data["student_roll_number"],
                 academic_year=exam.academic_year,
                 semester=exam.semester,
-                branch="",  # Will be populated from student record
+                branch=branch,
                 subjects=data["subjects"],
                 total_subjects=total_subjects,
                 subjects_passed=subjects_passed,
@@ -1013,17 +1159,23 @@ async def get_student_result(
     # Authorization check
     if current_user.role == "student" and str(current_user.id) != student_id:
         raise HTTPException(status_code=403, detail="Not authorized")
+    # Parent: can only see linked children
+    if current_user.role == "parent":
+        child_ids = [str(cid) for cid in (current_user.profile.student_ids or [])]
+        if student_id not in child_ids:
+            raise HTTPException(status_code=403, detail="Not authorized to view this student's result")
     
     result = await ExamResult.find_one(
         ExamResult.exam_id == ObjectId(exam_id),
-        ExamResult.student_id == ObjectId(student_id)
+        ExamResult.student_id == ObjectId(student_id),
+        ExamResult.college_id == current_user.college_id
     )
     
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
     
-    # Students can only see published results
-    if current_user.role == "student" and not result.is_published:
+    # Students and parents can only see published results
+    if current_user.role in ("student", "parent") and not result.is_published:
         raise HTTPException(status_code=404, detail="Result not published yet")
     
     return {
@@ -1060,7 +1212,7 @@ async def get_student_result(
         "has_backlogs": result.has_backlogs,
         "backlog_count": result.backlog_count,
         "is_published": result.is_published,
-        "published_at": result.published_at.isoformat() if result.published_at else None
+        "published_at": result.published_at if result.published_at else None
     }
 
 
@@ -1072,11 +1224,18 @@ async def get_all_student_results(
     """Get all exam results for a student"""
     if current_user.role == "student" and str(current_user.id) != student_id:
         raise HTTPException(status_code=403, detail="Not authorized")
+    if current_user.role == "parent":
+        child_ids = [str(cid) for cid in (current_user.profile.student_ids or [])]
+        if student_id not in child_ids:
+            raise HTTPException(status_code=403, detail="Not authorized to view this student's results")
     
-    query_filters = [ExamResult.student_id == ObjectId(student_id)]
+    query_filters = [
+        ExamResult.student_id == ObjectId(student_id),
+        ExamResult.college_id == current_user.college_id,
+    ]
     
-    # Students can only see published results
-    if current_user.role == "student":
+    # Students and parents can only see published results
+    if current_user.role in ("student", "parent"):
         query_filters.append(ExamResult.is_published == True)
     
     results = await ExamResult.find(*query_filters).sort("-semester").to_list()
@@ -1087,6 +1246,7 @@ async def get_all_student_results(
             "exam_id": str(r.exam_id),
             "academic_year": r.academic_year,
             "semester": r.semester,
+            "branch": r.branch,
             "sgpa": r.sgpa,
             "cgpa": r.cgpa,
             "percentage": r.percentage,
@@ -1095,7 +1255,24 @@ async def get_all_student_results(
             "backlog_count": r.backlog_count,
             "total_subjects": r.total_subjects,
             "subjects_passed": r.subjects_passed,
-            "is_published": r.is_published
+            "subjects_failed": r.subjects_failed,
+            "total_credits": r.total_credits,
+            "credits_earned": r.credits_earned,
+            "is_published": r.is_published,
+            "subjects": [
+                {
+                    "subject_name": s.subject_name,
+                    "subject_code": s.subject_code,
+                    "credits": s.credits,
+                    "internal_marks": s.internal_marks,
+                    "external_marks": s.external_marks,
+                    "total_marks": s.total_marks,
+                    "grade": s.grade,
+                    "grade_points": s.grade_points,
+                    "result_status": s.result_status
+                }
+                for s in r.subjects
+            ],
         }
         for r in results
     ]
@@ -1313,6 +1490,47 @@ async def get_subject_performance(
     return performance_data
 
 
+@router.get("/analytics/exam-results", response_model=List[dict])
+async def get_exam_results_list(
+    exam_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get all results for a specific exam (Admin only)"""
+    if current_user.role not in ["super_admin", "college_admin"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    exam = await Exam.get(ObjectId(exam_id))
+    if not exam or exam.college_id != current_user.college_id:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    results = await ExamResult.find(
+        ExamResult.exam_id == exam.id,
+        ExamResult.college_id == current_user.college_id
+    ).to_list()
+
+    return [
+        {
+            "id": str(r.id),
+            "student_name": r.student_name,
+            "roll_number": r.student_roll_number,
+            "academic_year": r.academic_year,
+            "semester": r.semester,
+            "branch": r.branch,
+            "sgpa": r.sgpa,
+            "cgpa": r.cgpa,
+            "percentage": r.percentage,
+            "result_status": r.result_status,
+            "has_backlog": r.has_backlogs,
+            "backlog_count": r.backlog_count,
+            "total_subjects": r.total_subjects,
+            "subjects_passed": r.subjects_passed,
+            "subjects_failed": r.subjects_failed,
+            "is_published": r.is_published,
+        }
+        for r in results
+    ]
+
+
 @router.get("/analytics/export-csv", response_model=dict)
 async def export_exam_results_csv(
     exam_id: str,
@@ -1376,27 +1594,56 @@ async def export_exam_results_csv(
 async def get_faculty_assigned_exams(
     current_user: User = Depends(get_current_user)
 ):
-    """Get exams assigned to faculty for invigilation or marks entry"""
+    """Get exams assigned to faculty for marks entry - filtered by faculty's subjects"""
     if current_user.role != "faculty":
         raise HTTPException(status_code=403, detail="Not authorized to access faculty exams")
     
-    # Get subject exams where faculty is invigilator
-    # This is simplified - in production, you'd have a faculty assignment table
-    subject_exams = await SubjectExam.find(
+    from app.models.faculty import Faculty as FacultyModel
+    faculty_doc = await FacultyModel.find_one(
+        FacultyModel.user_id == current_user.id,
+        FacultyModel.college_id == current_user.college_id
+    )
+
+    if not faculty_doc:
+        return []
+
+    # Strategy 1: faculty_id directly on SubjectExam
+    by_faculty_id = await SubjectExam.find(
         SubjectExam.college_id == current_user.college_id,
+        SubjectExam.faculty_id == current_user.id,
         {"status": {"$in": ["scheduled", "ongoing", "completed"]}}
-    ).limit(50).to_list()
-    
+    ).to_list()
+
+    # Strategy 2: subject_name matches faculty.subjects (for older records without faculty_id)
+    by_subject_name = []
+    if faculty_doc.subjects:
+        by_subject_name = await SubjectExam.find(
+            SubjectExam.college_id == current_user.college_id,
+            {"subject_name": {"$in": faculty_doc.subjects}},
+            {"status": {"$in": ["scheduled", "ongoing", "completed"]}}
+        ).to_list()
+
+    # Merge, deduplicate by id
+    seen = set()
+    subject_exams = []
+    for se in by_faculty_id + by_subject_name:
+        if str(se.id) not in seen:
+            seen.add(str(se.id))
+            subject_exams.append(se)
+
     return [
         {
             "id": str(se.id),
             "exam_id": str(se.exam_id),
             "subject_name": se.subject_name,
             "subject_code": se.subject_code,
-            "exam_date": se.exam_date.isoformat(),
-            "start_time": se.start_time.isoformat(),
-            "end_time": se.end_time.isoformat(),
+            "exam_date": se.exam_date,
+            "start_time": se.start_time,
+            "end_time": se.end_time,
             "room_numbers": se.room_numbers,
+            "max_marks": se.max_marks,
+            "internal_marks_weight": se.internal_marks_weight,
+            "external_marks_weight": se.external_marks_weight,
             "enrolled_students": se.enrolled_students,
             "appeared_students": se.appeared_students,
             "status": se.status
@@ -1410,17 +1657,36 @@ async def get_subject_exam_students(
     subject_exam_id: str,
     current_user: User = Depends(get_current_user)
 ):
-    """Get all students for a subject exam (Faculty/Admin)"""
+    """Get students for a subject exam.  Faculty sees only their assigned students."""
     if current_user.role not in ["super_admin", "college_admin", "faculty"]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     subject_exam = await SubjectExam.get(ObjectId(subject_exam_id))
     if not subject_exam or subject_exam.college_id != current_user.college_id:
         raise HTTPException(status_code=404, detail="Subject exam not found")
+
+    # Faculty isolation check
+    if current_user.role == "faculty":
+        from app.models.faculty import Faculty as FacultyModel
+        faculty_doc = await FacultyModel.find_one(
+            FacultyModel.user_id == current_user.id,
+            FacultyModel.college_id == current_user.college_id
+        )
+        if not faculty_doc:
+            raise HTTPException(status_code=403, detail="Faculty profile not found")
+        # Verify faculty owns this subject
+        if subject_exam.faculty_id and subject_exam.faculty_id != current_user.id:
+            raise HTTPException(status_code=403, detail="This subject exam is not assigned to you")
+        if faculty_doc.subjects and subject_exam.subject_name not in faculty_doc.subjects:
+            raise HTTPException(status_code=403, detail="This subject is not in your assigned subjects")
     
     student_exams = await StudentExam.find(
         StudentExam.subject_exam_id == subject_exam.id
     ).to_list()
+
+    # Filter to only assigned students when faculty
+    if current_user.role == "faculty" and faculty_doc.student_ids:
+        student_exams = [se for se in student_exams if se.student_id in faculty_doc.student_ids]
     
     return [
         {

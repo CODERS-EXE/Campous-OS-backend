@@ -35,6 +35,11 @@ class SubjectExamCreate(BaseModel):
     room_numbers: List[str] = Field(default_factory=list)
     internal_marks_weight: int = 30
     external_marks_weight: int = 70
+    # Faculty and scope fields
+    faculty_id: Optional[str] = Field(None, description="Faculty user_id responsible for marks entry")
+    department: Optional[str] = Field(None, description="Department scope")
+    year: Optional[int] = Field(None, description="Year scope")
+    target_semester: Optional[int] = Field(None, description="Semester scope")
 
 
 class SubjectExamUpdate(BaseModel):
@@ -43,3 +48,7 @@ class SubjectExamUpdate(BaseModel):
     end_time: Optional[str] = None
     room_numbers: Optional[List[str]] = None
     status: Optional[str] = None
+    faculty_id: Optional[str] = None
+    department: Optional[str] = None
+    year: Optional[int] = None
+    target_semester: Optional[int] = None

@@ -796,26 +796,53 @@ async def list_hostel_students(
     college: Annotated[College, Depends(get_tenant_college)],
     hostel: Optional[str] = None,
 ):
-    students = await Student.find(Student.college_id == college.id).to_list()
+    from app.models.hostel import RoomAllocation, Room as HostelRoom
+
+    # Get all active room allocations for this college
+    allocations = await RoomAllocation.find(
+        RoomAllocation.college_id == college.id,
+        RoomAllocation.status == "active"
+    ).to_list()
+
+    if not allocations:
+        return []
+
     result = []
-    for student in students:
-        u = await User.get(student.user_id)
+    for allocation in allocations:
+        # Get room details for hostel name
+        room = await HostelRoom.get(allocation.room_id)
+        hostel_name = room.hostel_name if room else None
+
+        # Apply hostel filter
+        if hostel and hostel_name != hostel:
+            continue
+
+        # Get student user
+        from beanie import PydanticObjectId as ObjId
+        student_user_id = allocation.student_id
+        try:
+            u = await User.get(ObjId(student_user_id))
+        except Exception:
+            continue
         if not u:
             continue
-        if hostel and u.profile.hostel != hostel:
-            continue
+
+        # Get student profile
+        from app.models.student import Student as StudentModel
+        student = await StudentModel.find_one(StudentModel.user_id == u.id)
+
         result.append({
-            "id": str(student.id),
+            "id": str(student.id) if student else student_user_id,
             "user_id": str(u.id),
             "name": u.name,
             "email": u.email,
-            "roll_no": student.roll_no,
-            "department": student.department,
-            "year": student.year,
-            "semester": student.semester,
-            "hostel": u.profile.hostel,
+            "roll_no": student.roll_no if student else "N/A",
+            "department": student.department if student else "N/A",
+            "year": student.year if student else None,
+            "semester": student.semester if student else None,
+            "hostel": hostel_name,
             "phone": u.profile.phone,
-            "emergency_contact": student.emergency_contact,
-            "blood_group": student.blood_group,
+            "emergency_contact": student.emergency_contact if student else None,
+            "blood_group": student.blood_group if student else None,
         })
     return result

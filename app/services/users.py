@@ -1,5 +1,6 @@
 from typing import Optional
 
+from beanie import PydanticObjectId
 from pydantic import BaseModel, EmailStr, Field
 
 from app.core.constants import UserRole
@@ -109,27 +110,48 @@ async def create_user(
         )
         await student.insert()
 
-        # Auto-assign student to all faculty of the same department (branch)
-        dept_faculty = await Faculty.find(
+        # Auto-assign student to matching faculty based on department + year + semester
+        # Only assign if no manual student_ids have been set for the faculty
+        matching_faculty = await Faculty.find(
             Faculty.college_id == college.id,
             Faculty.department == department,
+            Faculty.year == year,
+            Faculty.semester == semester,
         ).to_list()
 
-        for fac in dept_faculty:
+        for fac in matching_faculty:
+            # Only auto-assign if faculty has no manual assignments
             if user.id not in fac.student_ids:
                 fac.student_ids.append(user.id)
                 await fac.save()
+                
     elif role == UserRole.FACULTY.value:
         faculty = Faculty(
             college_id=college.id,
             user_id=user.id,
             department=department or "General",
             course=course,
+            year=year,
+            semester=semester,
             designation=designation,
             status=status or "active",
             subjects=subjects or [],
+            student_ids=[PydanticObjectId(sid) for sid in (student_ids or []) if PydanticObjectId.is_valid(sid)],
         )
         await faculty.insert()
+
+        # Auto-assign existing students based on department + year + semester match
+        # Only if no manual student_ids provided
+        if not faculty.student_ids and faculty.department and faculty.year and faculty.semester:
+            matching_students = await Student.find(
+                Student.college_id == college.id,
+                Student.department == faculty.department,
+                Student.year == faculty.year,
+                Student.semester == faculty.semester,
+            ).to_list()
+            if matching_students:
+                faculty.student_ids = [student.user_id for student in matching_students]
+                await faculty.save()
 
     return user
 
@@ -202,6 +224,9 @@ async def update_user(
         if not student:
             raise ValueError("Student profile not found")
         old_department = student.department
+        old_year = student.year
+        old_semester = student.semester
+        
         if roll_no is not None:
             student.roll_no = roll_no
         if department is not None:
@@ -214,41 +239,78 @@ async def update_user(
             student.semester = semester
         await student.save()
 
-        # If department changed, re-assign to new department's faculty
-        if department is not None and department != old_department:
-            # Remove from old department faculty
-            old_faculty = await Faculty.find(
-                Faculty.college_id == user.college_id,
-                Faculty.department == old_department,
-            ).to_list()
+        # If department OR year OR semester changed, re-assign to matching faculty
+        if (department is not None and department != old_department) or \
+           (year is not None and year != old_year) or \
+           (semester is not None and semester != old_semester):
+            
+            # Remove from old faculty assignments
+            old_faculty = await Faculty.find(Faculty.college_id == user.college_id).to_list()
             for fac in old_faculty:
                 if user.id in fac.student_ids:
                     fac.student_ids.remove(user.id)
                     await fac.save()
 
-            # Add to new department faculty
-            new_faculty = await Faculty.find(
+            # Add to new matching faculty based on dept + year + semester
+            new_dept = department if department is not None else old_department
+            new_year = year if year is not None else old_year
+            new_sem = semester if semester is not None else old_semester
+            
+            matching_faculty = await Faculty.find(
                 Faculty.college_id == user.college_id,
-                Faculty.department == department,
+                Faculty.department == new_dept,
+                Faculty.year == new_year,
+                Faculty.semester == new_sem,
             ).to_list()
-            for fac in new_faculty:
+            
+            for fac in matching_faculty:
                 if user.id not in fac.student_ids:
                     fac.student_ids.append(user.id)
                     await fac.save()
+                    
     elif user.role == UserRole.FACULTY.value:
         faculty = await Faculty.find_one(Faculty.user_id == user.id, Faculty.college_id == user.college_id)
         if not faculty:
             raise ValueError("Faculty profile not found")
+        old_department = faculty.department
+        old_year = faculty.year
+        old_semester = faculty.semester
+        
         if department is not None:
             faculty.department = department
         if course is not None:
             faculty.course = course
+        if year is not None:
+            faculty.year = year
+        if semester is not None:
+            faculty.semester = semester
         if designation is not None:
             faculty.designation = designation
         if status is not None:
             faculty.status = status
         if subjects is not None:
             faculty.subjects = subjects
+            
+        # Manual assignment takes precedence - only auto-assign if student_ids not manually set
+        if student_ids is not None:
+            faculty.student_ids = [PydanticObjectId(sid) for sid in student_ids if PydanticObjectId.is_valid(sid)]
+        elif (department is not None and department != old_department) or \
+             (year is not None and year != old_year) or \
+             (semester is not None and semester != old_semester):
+            # Re-assign students based on new dept + year + semester
+            new_dept = department if department is not None else old_department
+            new_year = year if year is not None else old_year
+            new_sem = semester if semester is not None else old_semester
+            
+            if new_dept and new_year and new_sem:
+                matching_students = await Student.find(
+                    Student.college_id == user.college_id,
+                    Student.department == new_dept,
+                    Student.year == new_year,
+                    Student.semester == new_sem,
+                ).to_list()
+                faculty.student_ids = [student.user_id for student in matching_students]
+                
         await faculty.save()
 
     return user

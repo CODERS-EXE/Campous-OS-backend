@@ -1,6 +1,7 @@
 from typing import Annotated, List
 
 from beanie import PydanticObjectId
+from beanie.operators import In
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.constants import UserRole
@@ -56,7 +57,7 @@ async def list_students(
         # faculty.student_ids expected to be list of student user_ids (PydanticObjectId)
         if not faculty.student_ids:
             return []
-        students = await Student.find(Student.college_id == college.id, Student.user_id.in_(faculty.student_ids)).to_list()
+        students = await Student.find(Student.college_id == college.id, In(Student.user_id, faculty.student_ids)).to_list()
     else:
         students = await Student.find(Student.college_id == college.id).to_list()
 
@@ -102,9 +103,12 @@ async def list_faculty(
                     email=u.email,
                     department=f.department,
                     course=f.course,
+                    year=f.year,
+                    semester=f.semester,
                     designation=f.designation,
                     status=f.status,
                     subjects=f.subjects,
+                    student_ids=[str(sid) for sid in f.student_ids],
                     avatar_url=u.profile.avatar_url,
                     created_at=f.created_at,
                 )
@@ -161,7 +165,7 @@ async def create_college_user(
     return _to_user_response(user)
 
 
-@router.patch("/{user_id}", response_model=UserSummaryResponse)
+@router.patch("/{user_id}")
 async def update_college_user(
     user_id: str,
     body: UserUpdateRequest,
@@ -193,6 +197,45 @@ async def update_college_user(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    # Return appropriate response based on role
+    if updated_user.role == UserRole.FACULTY.value:
+        faculty = await Faculty.find_one(Faculty.user_id == updated_user.id, Faculty.college_id == college.id)
+        if faculty:
+            return FacultyProfileResponse(
+                id=str(faculty.id),
+                user_id=str(updated_user.id),
+                name=updated_user.name,
+                email=updated_user.email,
+                department=faculty.department,
+                course=faculty.course,
+                year=faculty.year,
+                semester=faculty.semester,
+                designation=faculty.designation,
+                status=faculty.status,
+                subjects=faculty.subjects,
+                student_ids=[str(sid) for sid in faculty.student_ids],
+                avatar_url=updated_user.profile.avatar_url,
+                created_at=faculty.created_at,
+            )
+    elif updated_user.role == UserRole.STUDENT.value:
+        student = await Student.find_one(Student.user_id == updated_user.id, Student.college_id == college.id)
+        if student:
+            return StudentProfileResponse(
+                id=str(student.id),
+                user_id=str(updated_user.id),
+                name=updated_user.name,
+                email=updated_user.email,
+                roll_no=student.roll_no,
+                department=student.department,
+                course=student.course,
+                year=student.year,
+                semester=student.semester,
+                avatar_url=updated_user.profile.avatar_url,
+                emergency_contact=updated_user.profile.emergency_contact,
+                blood_group=updated_user.profile.blood_group,
+                created_at=student.created_at,
+            )
 
     return _to_user_response(updated_user)
 
@@ -245,6 +288,8 @@ async def my_profile(
             name=user.name,
             email=user.email,
             department=faculty.department,
+            year=faculty.year,
+            semester=faculty.semester,
             subjects=faculty.subjects,
             avatar_url=user.profile.avatar_url,
         )

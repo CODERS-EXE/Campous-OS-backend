@@ -1,3 +1,4 @@
+import base64
 import logging
 from typing import Any, Dict, List, Optional
 import httpx
@@ -10,20 +11,25 @@ from app.models.attendance import Attendance
 from app.models.college import College
 from app.models.faculty import Faculty
 from app.models.hostel import Outpass, Room
-from app.models.notification import Notification
 from app.models.result import Result
 from app.models.student import Student
-from app.models.submission import Submission
 from app.models.timetable import TimetableEntry
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# History kept per user in DB; only last N sent to LLM to avoid token overflow
+HISTORY_CONTEXT_LIMIT = 10
+HISTORY_FETCH_LIMIT = 50
+
 
 class AiService:
+
+    # ── Chat History ────────────────────────────────────────────────────────────
+
     @staticmethod
-    async def get_chat_history(user_id: PydanticObjectId, limit: int = 50) -> List[AiChatMessage]:
+    async def get_chat_history(user_id: PydanticObjectId, limit: int = HISTORY_FETCH_LIMIT) -> List[AiChatMessage]:
         return await AiChatMessage.find(
             AiChatMessage.user_id == user_id
         ).sort("+created_at").limit(limit).to_list()
@@ -50,6 +56,8 @@ class AiService:
     async def clear_chat_history(user_id: PydanticObjectId) -> None:
         await AiChatMessage.find(AiChatMessage.user_id == user_id).delete()
 
+    # ── Role Suggestions ────────────────────────────────────────────────────────
+
     @staticmethod
     def get_role_suggestions(role: str) -> List[str]:
         if role == "student":
@@ -57,16 +65,16 @@ class AiService:
                 "What is my current attendance percentage?",
                 "Show my recent exam results and grades",
                 "What assignments are due soon?",
-                "What is my schedule and timetable for today?",
-                "How can I prepare for my upcoming exams?"
+                "What is my schedule for today?",
+                "How can I prepare for my upcoming exams?",
             ]
         elif role == "faculty":
             return [
                 "Show attendance summary for my classes",
                 "What is the average performance of my students?",
-                "Which assignments need evaluation and grading?",
+                "Which assignments need evaluation?",
                 "What is my teaching schedule for today?",
-                "How can I improve student engagement?"
+                "How can I improve student engagement?",
             ]
         elif role == "parent":
             return [
@@ -74,7 +82,7 @@ class AiService:
                 "What are my child's latest exam results?",
                 "Are there any unread college notifications?",
                 "What is the fee status for my child?",
-                "Is my child hostel or bus tracking active?"
+                "Is my child's bus tracking active?",
             ]
         elif role in ("college_admin", "super_admin"):
             return [
@@ -82,7 +90,7 @@ class AiService:
                 "What is the overall college attendance rate?",
                 "Show department-wise student distribution",
                 "Are there any urgent notifications or fee alerts?",
-                "Generate an administrative performance report"
+                "Generate an administrative performance report",
             ]
         elif role == "warden":
             return [
@@ -90,17 +98,21 @@ class AiService:
                 "How many outpass requests are pending approval?",
                 "Show hosteller emergency contact records",
                 "List available rooms in block A and B",
-                "Show recent hostel activity and outpass logs"
+                "Show recent hostel activity and outpass logs",
             ]
         return [
             "How can CampusOS AI help me today?",
             "Show system overview and status",
-            "What features are available for my role?"
+            "What features are available for my role?",
         ]
+
+    # ── Context Gathering ───────────────────────────────────────────────────────
 
     @classmethod
     async def gather_user_context(cls, user: User, college: Optional[College]) -> Dict[str, Any]:
-        """Fetch live MongoDB data context based on user role and tenant isolation."""
+        """Fetch live MongoDB data based on user role with strict college isolation."""
+        col_id = (college.id if college else user.college_id)
+
         context: Dict[str, Any] = {
             "user_name": user.name,
             "user_email": user.email,
@@ -109,19 +121,28 @@ class AiService:
         }
 
         try:
-            # 1. STUDENT CONTEXT
+            # ── STUDENT ────────────────────────────────────────────────────────
             if user.role == "student":
-                student = await Student.find_one(Student.user_id == user.id)
+                student = await Student.find_one(
+                    Student.user_id == user.id,
+                    *([Student.college_id == col_id] if col_id else [])
+                )
                 if student:
-                    context["roll_no"] = student.roll_no
-                    context["department"] = student.department
-                    context["year"] = student.year
-                    context["semester"] = student.semester
+                    context.update({
+                        "roll_no": student.roll_no,
+                        "department": student.department,
+                        "year": student.year,
+                        "semester": student.semester,
+                    })
 
-                    # Exam Results
-                    results = await Result.find(Result.student_id == student.id).to_list()
+                    # Results — scoped by student document id and user id
+                    results = await Result.find(
+                        Result.student_id == student.id
+                    ).limit(10).to_list()
                     if not results:
-                        results = await Result.find(Result.student_id == user.id).to_list()
+                        results = await Result.find(
+                            Result.student_id == user.id
+                        ).limit(10).to_list()
                     context["results"] = [
                         {
                             "subject": r.subject,
@@ -132,8 +153,14 @@ class AiService:
                         for r in results
                     ]
 
-                    # Attendance Summary
-                    attendances = await Attendance.find().to_list()
+                    # Attendance — FIX: filter by college_id
+                    if col_id:
+                        attendances = await Attendance.find(
+                            Attendance.college_id == col_id
+                        ).limit(100).to_list()
+                    else:
+                        attendances = []
+
                     total_classes = 0
                     present_count = 0
                     student_records = []
@@ -146,73 +173,83 @@ class AiService:
                                 student_records.append({
                                     "subject": att.subject,
                                     "date": att.date.strftime("%Y-%m-%d") if att.date else "",
-                                    "status": rec.status
+                                    "status": rec.status,
                                 })
                     pct = round((present_count / total_classes * 100), 1) if total_classes > 0 else 100.0
                     context["attendance_summary"] = {
                         "total_classes": total_classes,
                         "present": present_count,
                         "percentage": pct,
-                        "records": student_records[:5]
+                        "records": student_records[:5],
                     }
 
-                    # Assignments
-                    col_id = college.id if college else user.college_id
+                    # Assignments — college-scoped published only
                     if col_id:
                         assignments = await Assignment.find(
                             Assignment.college_id == col_id,
-                            Assignment.published == True
-                        ).to_list()
+                            Assignment.published == True,
+                        ).limit(10).to_list()
                         context["assignments"] = [
                             {
                                 "title": a.title,
                                 "subject": a.subject or "General",
-                                "due_date": a.due_date.strftime("%Y-%m-%d") if a.due_date else "No deadline"
+                                "due_date": a.due_date.strftime("%Y-%m-%d") if a.due_date else "No deadline",
                             }
                             for a in assignments
                         ]
 
-                    # Timetable
+                    # Timetable count
                     if col_id:
-                        timetable = await TimetableEntry.find(TimetableEntry.college_id == col_id).to_list()
-                        context["timetable_count"] = len(timetable)
+                        tt_count = await TimetableEntry.find(
+                            TimetableEntry.college_id == col_id
+                        ).count()
+                        context["timetable_count"] = tt_count
 
-            # 2. FACULTY CONTEXT
+            # ── FACULTY ────────────────────────────────────────────────────────
             elif user.role == "faculty":
-                faculty = await Faculty.find_one(Faculty.user_id == user.id)
+                faculty = await Faculty.find_one(
+                    Faculty.user_id == user.id,
+                    *([Faculty.college_id == col_id] if col_id else [])
+                )
                 if faculty:
-                    context["department"] = faculty.department
-                    context["designation"] = faculty.designation or "Faculty Member"
-                    context["subjects"] = faculty.subjects
-                    context["assigned_students_count"] = len(faculty.student_ids)
+                    context.update({
+                        "department": faculty.department,
+                        "designation": faculty.designation or "Faculty Member",
+                        "subjects": faculty.subjects,
+                        "assigned_students_count": len(faculty.student_ids),
+                    })
 
-                    # Assignments created by faculty
-                    my_assignments = await Assignment.find(Assignment.created_by == user.id).to_list()
-                    context["created_assignments_count"] = len(my_assignments)
+                    created_count = await Assignment.find(
+                        Assignment.created_by == user.id
+                    ).count()
+                    context["created_assignments_count"] = created_count
 
-                    # Timetable entries for faculty
-                    my_tt = await TimetableEntry.find(TimetableEntry.faculty_id == user.id).to_list()
+                    my_tt = await TimetableEntry.find(
+                        TimetableEntry.faculty_id == user.id
+                    ).limit(20).to_list()
                     context["timetable_sessions"] = [
                         {
                             "subject": t.subject,
                             "classroom": t.classroom or "N/A",
                             "day": t.day_of_week,
-                            "time": f"{t.start_time} - {t.end_time}"
+                            "time": f"{t.start_time} - {t.end_time}",
                         }
                         for t in my_tt
                     ]
 
-            # 3. PARENT CONTEXT
+            # ── PARENT ─────────────────────────────────────────────────────────
             elif user.role == "parent":
                 child_user_ids = user.profile.student_ids if user.profile else []
                 children_info = []
                 for cid_str in child_user_ids:
                     try:
-                        cid = PydanticObjectId(cid_str)
+                        cid = PydanticObjectId(str(cid_str))
                         c_user = await User.get(cid)
                         c_student = await Student.find_one(Student.user_id == cid)
                         if c_user:
-                            results = await Result.find(Result.student_id == (c_student.id if c_student else cid)).to_list()
+                            results = await Result.find(
+                                Result.student_id == (c_student.id if c_student else cid)
+                            ).limit(5).to_list()
                             children_info.append({
                                 "name": c_user.name,
                                 "roll_no": c_student.roll_no if c_student else "N/A",
@@ -224,82 +261,100 @@ class AiService:
                         pass
                 context["children"] = children_info
 
-            # 4. ADMIN CONTEXT (COLLEGE ADMIN / SUPER ADMIN)
+            # ── ADMIN ──────────────────────────────────────────────────────────
             elif user.role in ("college_admin", "super_admin"):
-                col_id = college.id if college else user.college_id
                 if col_id:
-                    total_students = await Student.find(Student.college_id == col_id).count()
-                    total_faculty = await Faculty.find(Faculty.college_id == col_id).count()
-                    total_assignments = await Assignment.find(Assignment.college_id == col_id).count()
-                    context["total_students"] = total_students
-                    context["total_faculty"] = total_faculty
-                    context["total_assignments"] = total_assignments
-                else:
+                    context["total_students"] = await Student.find(
+                        Student.college_id == col_id
+                    ).count()
+                    context["total_faculty"] = await Faculty.find(
+                        Faculty.college_id == col_id
+                    ).count()
+                    context["total_assignments"] = await Assignment.find(
+                        Assignment.college_id == col_id
+                    ).count()
+                elif user.role == "super_admin":
                     context["total_colleges"] = await College.find().count()
                     context["total_users"] = await User.find().count()
 
-            # 5. WARDEN CONTEXT
+            # ── WARDEN ─────────────────────────────────────────────────────────
             elif user.role == "warden":
-                col_id = college.id if college else user.college_id
                 if col_id:
                     rooms = await Room.find(Room.college_id == col_id).to_list()
                     outpasses = await Outpass.find(Outpass.college_id == col_id).to_list()
                     pending_outpasses = [o for o in outpasses if o.status == "pending"]
-                    total_capacity = sum(r.capacity for r in rooms)
-                    total_occupied = sum(r.occupied for r in rooms)
-
-                    context["total_rooms"] = len(rooms)
-                    context["total_capacity"] = total_capacity
-                    context["total_occupied"] = total_occupied
-                    context["pending_outpasses_count"] = len(pending_outpasses)
+                    context.update({
+                        "total_rooms": len(rooms),
+                        "total_capacity": sum(r.capacity for r in rooms),
+                        "total_occupied": sum(r.occupied for r in rooms),
+                        "pending_outpasses_count": len(pending_outpasses),
+                    })
 
         except Exception as e:
-            logger.error(f"Error gathering context for AI: {e}")
+            logger.error(f"Error gathering AI context for {user.role} user {user.id}: {e}")
 
         return context
+
+    # ── Main Chat Processor ─────────────────────────────────────────────────────
 
     @classmethod
     async def process_chat(
         cls,
         user: User,
         college: Optional[College],
-        user_message: str
+        user_message: str,
+        image_base64: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Main entry point to process AI chat request with multi-turn history memory."""
-        # 1. Fetch live MongoDB context
+        """Process an AI chat request with live context and conversation memory."""
+        if not user_message.strip() and not image_base64:
+            raise ValueError("Message cannot be empty")
+
+        # 1. Gather live MongoDB context for the user
         context = await cls.gather_user_context(user, college)
 
-        # 2. Retrieve recent conversation history for memory context (last 5 messages)
-        recent_history = await cls.get_chat_history(user.id, limit=5)
+        # 2. Retrieve recent history for memory (limit to avoid token overflow)
+        recent_history = await cls.get_chat_history(user.id, limit=HISTORY_CONTEXT_LIMIT)
 
-        # 3. Save current user message to database
+        # 3. Compose message content; if image provided, note it in the message
+        col_id = college.id if college else user.college_id
+        full_message = user_message
+        if image_base64:
+            full_message = f"[Image attached]\n{user_message}" if user_message.strip() else "[Image attached — please analyze this image]"
+
+        # 4. Save user message
         await cls.save_message(
             user_id=user.id,
-            college_id=college.id if college else user.college_id,
+            college_id=col_id,
             role=user.role,
             sender="user",
-            content=user_message
+            content=full_message,
         )
 
-        # 4. Generate AI response using Groq / Gemini / OpenAI / Smart Domain Fallback Engine
-        response_text = await cls._generate_response(user, college, context, recent_history, user_message)
+        # 5. Generate AI response
+        response_text = await cls._generate_response(
+            user=user,
+            college=college,
+            context=context,
+            history=recent_history,
+            user_message=user_message,
+            image_base64=image_base64,
+        )
 
-        # 5. Save assistant response to database
+        # 6. Save assistant response
         await cls.save_message(
             user_id=user.id,
-            college_id=college.id if college else user.college_id,
+            college_id=col_id,
             role=user.role,
             sender="assistant",
-            content=response_text
+            content=response_text,
         )
-
-        # 6. Suggested questions
-        suggestions = cls.get_role_suggestions(user.role)
 
         return {
             "reply": response_text,
-            "suggested_questions": suggestions,
+            "suggested_questions": cls.get_role_suggestions(user.role),
         }
+
+    # ── LLM Cascade ─────────────────────────────────────────────────────────────
 
     @classmethod
     async def _generate_response(
@@ -308,34 +363,37 @@ class AiService:
         college: Optional[College],
         context: Dict[str, Any],
         history: List[AiChatMessage],
-        user_message: str
+        user_message: str,
+        image_base64: Optional[str] = None,
     ) -> str:
-        # Check available LLM API keys in config
+        # Groq first (fastest, free tier available)
         if settings.GROQ_API_KEY:
             try:
-                reply = await cls._call_groq_api(user_message, history, context)
+                reply = await cls._call_groq_api(user_message, history, context, image_base64)
                 if reply:
                     return reply
             except Exception as e:
-                logger.warning(f"Groq API call failed: {e}")
+                logger.warning(f"Groq API failed: {e}")
 
+        # Gemini second (supports vision natively)
         if settings.GEMINI_API_KEY:
             try:
-                reply = await cls._call_gemini_api(user_message, history, context)
+                reply = await cls._call_gemini_api(user_message, history, context, image_base64)
                 if reply:
                     return reply
             except Exception as e:
-                logger.warning(f"Gemini API call failed: {e}")
+                logger.warning(f"Gemini API failed: {e}")
 
+        # OpenAI fallback
         if settings.OPENAI_API_KEY:
             try:
-                reply = await cls._call_openai_api(user_message, history, context)
+                reply = await cls._call_openai_api(user_message, history, context, image_base64)
                 if reply:
                     return reply
             except Exception as e:
-                logger.warning(f"OpenAI API call failed: {e}")
+                logger.warning(f"OpenAI API failed: {e}")
 
-        # Smart fallback domain engine using live MongoDB context
+        # Smart keyword fallback (no LLM required)
         return cls._smart_domain_response(user, context, user_message)
 
     @classmethod
@@ -343,32 +401,47 @@ class AiService:
         cls,
         prompt: str,
         history: List[AiChatMessage],
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        image_base64: Optional[str] = None,
     ) -> Optional[str]:
         url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {settings.GROQ_API_KEY}"}
+        headers = {
+            "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        }
         system_prompt = (
-            f"You are the CampusOS AI Assistant for user '{context.get('user_name')}' "
-            f"({context.get('role')} at {context.get('college_name')}). Live context: {context}"
+            f"You are CampusOS AI Assistant helping '{context.get('user_name')}' "
+            f"({context.get('role')} at {context.get('college_name')}). "
+            f"Live campus data: {context}. "
+            "Respond in a helpful, concise, markdown-formatted manner. "
+            "Prioritize data from the live context provided."
         )
 
         messages = [{"role": "system", "content": system_prompt}]
-        for msg in history:
-            role_str = "user" if msg.sender == "user" else "assistant"
-            messages.append({"role": role_str, "content": msg.content})
-        messages.append({"role": "user", "content": prompt})
+        for msg in history[-HISTORY_CONTEXT_LIMIT:]:
+            messages.append({
+                "role": "user" if msg.sender == "user" else "assistant",
+                "content": msg.content,
+            })
+
+        # Groq does not yet support vision; send text-only even if image provided
+        user_content = prompt
+        if image_base64:
+            user_content = f"[The user has uploaded an image. Describe what a campus AI would say about it.]\n{prompt}"
+        messages.append({"role": "user", "content": user_content})
 
         payload = {
             "model": "llama-3.1-8b-instant",
             "messages": messages,
-            "temperature": 0.7
+            "temperature": 0.7,
+            "max_tokens": 1024,
         }
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=20.0) as client:
             res = await client.post(url, json=payload, headers=headers)
             if res.status_code == 200:
-                data = res.json()
-                return data["choices"][0]["message"]["content"]
+                return res.json()["choices"][0]["message"]["content"]
+            logger.warning(f"Groq HTTP {res.status_code}: {res.text[:200]}")
         return None
 
     @classmethod
@@ -376,24 +449,40 @@ class AiService:
         cls,
         prompt: str,
         history: List[AiChatMessage],
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        image_base64: Optional[str] = None,
     ) -> Optional[str]:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={settings.GEMINI_API_KEY}"
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-1.5-flash:generateContent?key={settings.GEMINI_API_KEY}"
+        )
         system_instruction = (
-            f"You are the CampusOS AI Assistant. You are conversing with user '{context.get('user_name')}' "
-            f"who is a {context.get('role')} at {context.get('college_name')}.\n"
-            f"Live Database Context: {context}\n"
-            "Provide concise, accurate, polite, and well-formatted markdown answers."
+            f"You are the CampusOS AI Assistant for '{context.get('user_name')}' "
+            f"({context.get('role')} at {context.get('college_name')}). "
+            f"Live campus data context: {context}. "
+            "Be concise, accurate, and format responses in markdown."
         )
 
-        hist_str = "\n".join([f"{m.sender.upper()}: {m.content}" for m in history])
-        full_text = f"{system_instruction}\n\nChat History:\n{hist_str}\n\nUser Question: {prompt}"
+        hist_str = "\n".join([f"{m.sender.upper()}: {m.content}" for m in history[-HISTORY_CONTEXT_LIMIT:]])
+        full_text = f"{system_instruction}\n\nConversation:\n{hist_str}\n\nUser: {prompt}"
 
-        payload = {
-            "contents": [{"parts": [{"text": full_text}]}]
-        }
+        # Build content parts — support vision if image provided
+        parts: list = [{"text": full_text}]
+        if image_base64:
+            # Strip data URI prefix if present
+            img_data = image_base64
+            if "," in image_base64:
+                img_data = image_base64.split(",", 1)[1]
+            parts.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": img_data,
+                }
+            })
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        payload = {"contents": [{"parts": parts}]}
+
+        async with httpx.AsyncClient(timeout=25.0) as client:
             res = await client.post(url, json=payload)
             if res.status_code == 200:
                 data = res.json()
@@ -401,6 +490,7 @@ class AiService:
                     return data["candidates"][0]["content"]["parts"][0]["text"]
                 except (KeyError, IndexError):
                     return None
+            logger.warning(f"Gemini HTTP {res.status_code}: {res.text[:200]}")
         return None
 
     @classmethod
@@ -408,221 +498,213 @@ class AiService:
         cls,
         prompt: str,
         history: List[AiChatMessage],
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        image_base64: Optional[str] = None,
     ) -> Optional[str]:
         url = "https://api.openai.com/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {settings.OPENAI_API_KEY}"}
+        headers = {
+            "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        }
         system_prompt = (
-            f"You are the CampusOS AI Assistant for user '{context.get('user_name')}' "
-            f"({context.get('role')} at {context.get('college_name')}). Live context: {context}"
+            f"You are CampusOS AI Assistant for '{context.get('user_name')}' "
+            f"({context.get('role')} at {context.get('college_name')}). "
+            f"Live data: {context}. Reply concisely in markdown."
         )
 
         messages = [{"role": "system", "content": system_prompt}]
-        for msg in history:
-            role_str = "user" if msg.sender == "user" else "assistant"
-            messages.append({"role": role_str, "content": msg.content})
-        messages.append({"role": "user", "content": prompt})
+        for msg in history[-HISTORY_CONTEXT_LIMIT:]:
+            messages.append({
+                "role": "user" if msg.sender == "user" else "assistant",
+                "content": msg.content,
+            })
+
+        # Vision support via gpt-4o if image provided
+        if image_base64:
+            img_data = image_base64
+            if "," in image_base64:
+                img_data = image_base64.split(",", 1)[1]
+            model = "gpt-4o"
+            user_content: Any = [
+                {"type": "text", "text": prompt or "Please analyze this image."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{img_data}"},
+                },
+            ]
+        else:
+            model = "gpt-3.5-turbo"
+            user_content = prompt
+
+        messages.append({"role": "user", "content": user_content})
 
         payload = {
-            "model": "gpt-3.5-turbo",
+            "model": model,
             "messages": messages,
+            "max_tokens": 1024,
         }
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=25.0) as client:
             res = await client.post(url, json=payload, headers=headers)
             if res.status_code == 200:
-                data = res.json()
-                return data["choices"][0]["message"]["content"]
+                return res.json()["choices"][0]["message"]["content"]
+            logger.warning(f"OpenAI HTTP {res.status_code}: {res.text[:200]}")
         return None
+
+    # ── Smart Keyword Fallback ───────────────────────────────────────────────────
 
     @classmethod
     def _smart_domain_response(cls, user: User, context: Dict[str, Any], query: str) -> str:
         q = query.lower()
         role = user.role
-        user_name = user.name
+        name = user.name
 
-        # --- STUDENT RESPONSES ---
+        # ── STUDENT ────────────────────────────────────────────────────────────
         if role == "student":
             if "attendance" in q:
                 summary = context.get("attendance_summary", {})
                 pct = summary.get("percentage", 100.0)
                 tot = summary.get("total_classes", 0)
                 prs = summary.get("present", 0)
-                status_emoji = "✅ Good Standing" if pct >= 75 else "⚠️ Attention Needed"
+                status_str = "✅ Good Standing" if pct >= 75 else "⚠️ Below Required Minimum"
                 return (
-                    f"### 📊 Attendance Report for {user_name}\n\n"
-                    f"- **Overall Attendance:** `{pct}%` ({status_emoji})\n"
+                    f"### 📊 Attendance Report for {name}\n\n"
+                    f"- **Overall Attendance:** `{pct}%` — {status_str}\n"
                     f"- **Sessions Present:** {prs} / {tot} total classes\n\n"
-                    f"*(Campus Policy requires minimum 75% attendance to sit for final semester examinations).* "
-                    f"You can view session records under the **Attendance** section."
+                    f"_(Campus policy requires minimum **75% attendance** for exam eligibility.)_"
                 )
-            elif "result" in q or "grade" in q or "marks" in q or "score" in q:
+            elif any(k in q for k in ("result", "grade", "marks", "score")):
                 results = context.get("results", [])
                 if not results:
                     return (
-                        f"### 📝 Academic Results for {user_name}\n\n"
-                        f"No published examination scores were found for your profile yet (Semester {context.get('semester', 1)}). "
-                        f"Please check back when course faculty publish grades."
+                        f"### 📝 Exam Results — {name}\n\n"
+                        f"No published scores found for Semester {context.get('semester', 1)}. "
+                        f"Check back once faculty publish grades."
                     )
-                res_lines = "\n".join([
-                    f"- **{r['subject']}**: Marks `{r.get('total_marks', 'N/A')}` | Grade `{r.get('grade', 'N/A')}` ({r.get('exam_name', 'Exam')})"
+                lines = "\n".join(
+                    f"- **{r['subject']}**: `{r.get('total_marks', 'N/A')}` marks — Grade `{r.get('grade', 'N/A')}` ({r.get('exam_name', 'Exam')})"
                     for r in results
-                ])
-                return (
-                    f"### 📝 Academic Performance Summary\n\n"
-                    f"Here are your latest recorded grades:\n\n{res_lines}\n\n"
-                    f"Keep up the effort! Detailed subject breakdowns are available in **Results**."
                 )
-            elif "assignment" in q or "homework" in q or "task" in q:
+                return f"### 📝 Academic Performance\n\n{lines}\n\nView full marksheet in the **Results** section."
+            elif any(k in q for k in ("assignment", "homework", "task")):
                 assignments = context.get("assignments", [])
                 if not assignments:
-                    return (
-                        f"### 📚 Assignment Tracker\n\n"
-                        f"You have no pending published assignments at this time! 🎉"
-                    )
-                asg_lines = "\n".join([
+                    return "### 📚 Assignments\n\nNo pending published assignments right now! 🎉"
+                lines = "\n".join(
                     f"- 📌 **{a['title']}** ({a['subject']}) — Due: `{a['due_date']}`"
                     for a in assignments
-                ])
-                return (
-                    f"### 📚 Active Course Assignments\n\n"
-                    f"Here are your published assignments:\n\n{asg_lines}\n\n"
-                    f"Submit your solutions prior to the deadline via the **Assignments** tab."
                 )
-            elif "timetable" in q or "schedule" in q or "class" in q:
+                return f"### 📚 Active Assignments\n\n{lines}\n\nSubmit via the **Assignments** tab."
+            elif any(k in q for k in ("timetable", "schedule", "class", "today")):
                 return (
-                    f"### 📅 Timetable & Schedule\n\n"
-                    f"Your weekly timetable for **{context.get('department', 'Engineering')} (Semester {context.get('semester', 1)})** "
-                    f"is active. Visit the **Timetable** section for live session times and assigned classroom numbers."
+                    f"### 📅 Timetable — {context.get('department', 'Engineering')} Sem {context.get('semester', 1)}\n\n"
+                    f"Your weekly schedule is active. Visit the **Timetable** section for session times and rooms."
                 )
-            elif "fee" in q or "dues" in q or "payment" in q:
+            elif any(k in q for k in ("fee", "dues", "payment")):
                 return (
-                    f"### 💳 Fee Status & Dues\n\n"
-                    f"- **Roll No:** `{context.get('roll_no', user.id)}`\n"
-                    f"- **Status:** `Active / Settled`\n"
-                    f"- **Next Installment:** Due at semester registration.\n\n"
-                    f"For official receipts or fee structure queries, contact the administration office."
+                    f"### 💳 Fee Status\n\n"
+                    f"- **Roll No:** `{context.get('roll_no', 'N/A')}`\n"
+                    f"- Contact the admin office for official receipts or fee structure queries.\n"
+                    f"- Check the **Fees** section for your current balance and due dates."
                 )
-            elif "study" in q or "help" in q or "prepare" in q or "exam" in q:
+            elif any(k in q for k in ("study", "help", "prepare", "exam")):
                 return (
-                    f"### 💡 Study Assistance & Exam Advice\n\n"
-                    f"CampusOS AI Recommendations for {user_name}:\n"
-                    f"1. **Review Notes:** Access published lecture slides in the Notes section.\n"
-                    f"2. **Solve Assignments:** Complete coursework to reinforce key concepts.\n"
-                    f"3. **Maintain 80%+ Attendance:** Active participation improves academic outcomes.\n"
-                    f"4. **Peer Collaboration:** Work together on practical assignments."
+                    f"### 💡 Study Assistance for {name}\n\n"
+                    f"1. **Review lecture notes** published in the Notes section.\n"
+                    f"2. **Complete assignments** to reinforce key concepts.\n"
+                    f"3. **Maintain 80%+ attendance** — it directly impacts grades.\n"
+                    f"4. **Collaborate with peers** on practical assignments."
                 )
 
-        # --- FACULTY RESPONSES ---
+        # ── FACULTY ────────────────────────────────────────────────────────────
         elif role == "faculty":
-            if "student" in q or "performance" in q or "class" in q:
+            if any(k in q for k in ("student", "performance", "class")):
                 count = context.get("assigned_students_count", 0)
                 dept = context.get("department", "Department")
                 return (
-                    f"### 👨‍🏫 Faculty Insights & Students Overview\n\n"
+                    f"### 👨‍🏫 Faculty Insights\n\n"
                     f"- **Department:** {dept}\n"
-                    f"- **Assigned Students:** `{count}` active students\n"
+                    f"- **Assigned Students:** `{count}`\n"
                     f"- **Subjects:** {', '.join(context.get('subjects', ['General']))}\n\n"
-                    f"Inspect individual student scores and attendance metrics in the **Students** management section."
+                    f"View individual student scores in the **Students** section."
                 )
             elif "attendance" in q:
                 return (
-                    f"### 📋 Class Attendance Management\n\n"
-                    f"You can record daily lecture attendance, mark student attendance statuses, and export logs from the **Attendance** tab."
+                    f"### 📋 Attendance Management\n\n"
+                    f"Record daily attendance, mark statuses, and export logs from the **Attendance** tab."
                 )
-            elif "assignment" in q or "grading" in q:
-                created = context.get("created_assignments_count", 0)
+            elif any(k in q for k in ("assignment", "grading", "evaluation")):
                 return (
-                    f"### 📝 Assignment & Evaluation Portal\n\n"
-                    f"- **Assignments Published:** `{created}`\n\n"
-                    f"Evaluate student file submissions and post grades via the **Assignments** menu."
-                )
-            elif "teach" in q or "help" in q or "lesson" in q:
-                return (
-                    f"### 🎓 Teaching & Lesson Assistance\n\n"
-                    f"CampusOS AI Teaching Tips:\n"
-                    f"1. **Short Reflection Tasks:** Publish post-lecture assignments to test retention.\n"
-                    f"2. **Early Interventions:** Identify students below 75% attendance for mentoring.\n"
-                    f"3. **Notification Alerts:** Broadcast exam dates and submission reminders."
+                    f"### 📝 Assignments & Grading\n\n"
+                    f"- **Published:** `{context.get('created_assignments_count', 0)}`\n\n"
+                    f"Evaluate submissions and post grades via the **Assignments** menu."
                 )
 
-        # --- PARENT RESPONSES ---
+        # ── PARENT ─────────────────────────────────────────────────────────────
         elif role == "parent":
-            if "attendance" in q or "child" in q or "student" in q or "result" in q or "performance" in q:
+            if any(k in q for k in ("attendance", "child", "student", "result", "performance")):
                 children = context.get("children", [])
                 if children:
-                    c_info = "\n".join([
-                        f"- 👤 **{c['name']}** (Roll: {c['roll_no']}, Dept: {c['department']}) — {c['results_count']} recorded result(s)"
+                    lines = "\n".join(
+                        f"- 👤 **{c['name']}** (Roll: {c['roll_no']}, {c['department']}) — {c['results_count']} result(s)"
                         for c in children
-                    ])
+                    )
                     return (
-                        f"### 👨‍👩‍👧 Child Academic & Attendance Overview\n\n"
-                        f"Linked children profile(s):\n\n{c_info}\n\n"
-                        f"Track attendance percentages and examination transcripts under **My Children** and **Results**."
+                        f"### 👨‍👩‍👧 Child Academic Overview\n\n{lines}\n\n"
+                        f"Track attendance and exams under **My Children** → **Results**."
                     )
                 return (
-                    f"### 👨‍👩‍👧 Child Progress & Attendance\n\n"
-                    f"Your account is connected to your child's student record. "
-                    f"Go to **My Children** to review attendance, marks, and announcements."
+                    f"### 👨‍👩‍👧 Child Progress\n\n"
+                    f"Your account is linked to your child's record. "
+                    f"Go to **My Children** to review marks and attendance."
                 )
-            elif "notification" in q or "notice" in q:
-                return (
-                    f"### 🔔 Parent Announcements & Notices\n\n"
-                    f"View official college announcements, fee circulars, and holiday notifications in the **Notifications** tab."
-                )
-            elif "fee" in q or "payment" in q:
+            elif any(k in q for k in ("notification", "notice")):
+                return "### 🔔 Notifications\n\nCheck official announcements in the **Notifications** tab."
+            elif any(k in q for k in ("fee", "payment")):
                 return (
                     f"### 💳 Fee Status\n\n"
-                    f"- **Status:** `Up to date`\n"
-                    f"- **Portal:** Managed through College Administration.\n"
-                    f"Contact the college office if you need receipt copies."
+                    f"Contact the college office for receipt copies. "
+                    f"Check the **Fees** section for current dues."
                 )
 
-        # --- ADMIN RESPONSES ---
+        # ── ADMIN ──────────────────────────────────────────────────────────────
         elif role in ("college_admin", "super_admin"):
-            if "stat" in q or "insight" in q or "report" in q or "summary" in q or "user" in q:
+            if any(k in q for k in ("stat", "insight", "report", "summary", "user")):
                 if "total_students" in context:
-                    st = context.get("total_students", 0)
-                    fa = context.get("total_faculty", 0)
-                    asg = context.get("total_assignments", 0)
                     return (
-                        f"### 🏛️ College Statistics & Overview\n\n"
+                        f"### 🏛️ College Statistics\n\n"
                         f"- **Institution:** {context.get('college_name')}\n"
-                        f"- **Total Active Students:** `{st}`\n"
-                        f"- **Total Faculty:** `{fa}`\n"
-                        f"- **Course Assignments:** `{asg}`\n"
-                        f"- **System Health:** `100% Operational`\n\n"
-                        f"Manage college accounts and permissions via the **Students** and **Faculty** dashboards."
+                        f"- **Students:** `{context.get('total_students', 0)}`\n"
+                        f"- **Faculty:** `{context.get('total_faculty', 0)}`\n"
+                        f"- **Assignments:** `{context.get('total_assignments', 0)}`\n\n"
+                        f"Manage accounts via **Students** and **Faculty** dashboards."
                     )
-                else:
-                    tc = context.get("total_colleges", 0)
-                    tu = context.get("total_users", 0)
-                    return (
-                        f"### 🌐 Super Admin Platform Overview\n\n"
-                        f"- **Total Colleges:** `{tc}`\n"
-                        f"- **Total Platform Users:** `{tu}`\n"
-                        f"- **System Infrastructure:** `All Services Active`\n\n"
-                        f"Onboard new college tenants or inspect multi-tenant analytics from the **Colleges** tab."
-                    )
-
-        # --- WARDEN RESPONSES ---
-        elif role == "warden":
-            if "hostel" in q or "room" in q or "occupancy" in q or "outpass" in q or "record" in q:
-                tot_r = context.get("total_rooms", 0)
-                tot_c = context.get("total_capacity", 0)
-                tot_o = context.get("total_occupied", 0)
-                p_out = context.get("pending_outpasses_count", 0)
                 return (
-                    f"### 🏨 Hostel Administration Summary\n\n"
-                    f"- **Total Rooms:** `{tot_r}`\n"
-                    f"- **Beds Occupied:** `{tot_o} / {tot_c}`\n"
-                    f"- **Pending Outpass Requests:** `{p_out}` pending review\n\n"
-                    f"Approve or decline student outpass requests in the **Outpasses** dashboard."
+                    f"### 🌐 Platform Overview\n\n"
+                    f"- **Colleges:** `{context.get('total_colleges', 0)}`\n"
+                    f"- **Users:** `{context.get('total_users', 0)}`\n\n"
+                    f"Onboard new tenants from the **Colleges** tab."
                 )
 
-        # Default Intelligent Response
+        # ── WARDEN ─────────────────────────────────────────────────────────────
+        elif role == "warden":
+            if any(k in q for k in ("hostel", "room", "occupancy", "outpass", "record")):
+                return (
+                    f"### 🏨 Hostel Summary\n\n"
+                    f"- **Rooms:** `{context.get('total_rooms', 0)}`\n"
+                    f"- **Occupied:** `{context.get('total_occupied', 0)} / {context.get('total_capacity', 0)}`\n"
+                    f"- **Pending Outpasses:** `{context.get('pending_outpasses_count', 0)}`\n\n"
+                    f"Manage outpass requests in the **Outpasses** dashboard."
+                )
+
+        # ── DEFAULT ────────────────────────────────────────────────────────────
         return (
-            f"Hello {user_name}! I am your **CampusOS AI Assistant**.\n\n"
-            f"I am fully configured for your role as **{role.replace('_', ' ').title()}** at **{context.get('college_name')}**.\n\n"
-            f"Feel free to ask me about your academic records, attendance percentages, exam results, assignments, timetables, fee status, or hostel outpasses!"
+            f"Hello **{name}**! I am your **CampusOS AI Assistant** 🤖\n\n"
+            f"I am configured for your role as **{role.replace('_', ' ').title()}** "
+            f"at **{context.get('college_name')}**.\n\n"
+            f"You can ask me about:\n"
+            f"- Academic records, attendance, results, assignments\n"
+            f"- Timetable, fee status, notifications\n"
+            f"- Hostel, outpasses, student management\n\n"
+            f"_Tip: Use the suggestion chips below for quick questions!_"
         )

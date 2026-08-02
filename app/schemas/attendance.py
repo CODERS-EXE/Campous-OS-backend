@@ -1,25 +1,25 @@
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class StudentAttendanceIn(BaseModel):
     student_id: str
-    status: str
+    status: str  # present / absent / late
 
 
 class AttendanceCreate(BaseModel):
     subject: str
     date: datetime
-    session_name: str | None = None
+    session_name: Optional[str] = None
     records: List[StudentAttendanceIn]
 
 
 class StudentAttendanceOut(BaseModel):
     student_id: str
     status: str
-    marked_by: str | None = None
+    marked_by: Optional[str] = None
 
 
 class AttendanceOut(BaseModel):
@@ -27,6 +27,7 @@ class AttendanceOut(BaseModel):
     faculty_id: str
     subject: str
     date: datetime
-    session_name: str | None
+    session_name: Optional[str] = None
     records: List[StudentAttendanceOut]
     created_at: datetime
+    updated_at: Optional[datetime] = None

@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import datetime
 from typing import Optional, List
 from beanie import Document, PydanticObjectId
 from pydantic import Field
@@ -13,11 +13,19 @@ class SubjectExam(Document):
     subject_id: PydanticObjectId = Field(..., description="Reference to Subject")
     subject_name: str = Field(..., description="Subject name for quick access")
     subject_code: str = Field(..., description="Subject code")
+
+    # Faculty who owns this subject (for marks entry isolation)
+    faculty_id: Optional[PydanticObjectId] = Field(None, description="Faculty user_id responsible for marks entry")
+
+    # Department/Year/Semester scope (for student assignment)
+    department: Optional[str] = Field(None, description="Department this subject belongs to")
+    year: Optional[int] = Field(None, description="Year of students taking this subject")
+    target_semester: Optional[int] = Field(None, description="Semester of students taking this subject")
     
     # Scheduling
     exam_date: datetime = Field(..., description="Date of subject exam")
-    start_time: time = Field(..., description="Exam start time")
-    end_time: time = Field(..., description="Exam end time")
+    start_time: str = Field(..., description="Exam start time as HH:MM string")
+    end_time: str = Field(..., description="Exam end time as HH:MM string")
     duration_minutes: int = Field(..., ge=30, description="Exam duration in minutes")
     
     # Venue
@@ -53,9 +61,11 @@ class SubjectExam(Document):
         indexes = [
             "exam_id",
             "subject_id",
+            "faculty_id",
             "college_id",
             "exam_date",
             [("exam_id", 1), ("subject_id", 1)],
+            [("exam_id", 1), ("faculty_id", 1)],
         ]
 
     class Config:

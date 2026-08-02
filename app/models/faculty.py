@@ -14,6 +14,8 @@ class Faculty(Document):
     user_id: PydanticObjectId
     department: str
     course: Optional[str] = None
+    year: Optional[int] = None
+    semester: Optional[int] = None
     designation: Optional[str] = None
     status: str = "active"
     subjects: List[str] = Field(default_factory=list)

@@ -325,12 +325,8 @@ class BusService:
                 break
 
         if not assignment:
-            # If no direct assignment, check if there is a default active bus for the college
-            buses = await Bus.find(Bus.college_id == (college_id or (student.college_id if student else None))).to_list()
-            if not buses:
-                return None
-            bus = buses[0]
-            route = await BusRoute.get(bus.route_id) if bus.route_id else None
+            # No bus assigned to this student — return None (404)
+            return None
         else:
             bus = await Bus.get(assignment.bus_id)
             route = await BusRoute.get(assignment.route_id)

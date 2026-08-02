@@ -11,7 +11,8 @@ router = APIRouter(prefix="/ai", tags=["ai"])
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=2000)
+    message: str = Field(..., min_length=1, max_length=4000)
+    image_base64: Optional[str] = Field(None, description="Base64 encoded image for vision analysis")
 
 
 class ChatResponse(BaseModel):
@@ -40,12 +41,18 @@ async def chat_with_ai(
         res = await AiService.process_chat(
             user=user,
             college=college,
-            user_message=body.message
+            user_message=body.message,
+            image_base64=body.image_base64,
         )
         return ChatResponse(
             reply=res["reply"],
             suggested_questions=res["suggested_questions"]
         )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc)
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

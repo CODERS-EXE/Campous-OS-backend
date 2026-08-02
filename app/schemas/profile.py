@@ -27,9 +27,12 @@ class FacultyProfileResponse(BaseModel):
     email: EmailStr
     department: str
     course: Optional[str] = None
+    year: Optional[int] = None
+    semester: Optional[int] = None
     designation: Optional[str] = None
     status: Optional[str] = None
     subjects: list[str]
+    student_ids: list[str] = Field(default_factory=list)
     avatar_url: Optional[str] = None
     created_at: Optional[datetime] = None
 

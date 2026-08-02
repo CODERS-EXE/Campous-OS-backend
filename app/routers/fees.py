@@ -20,6 +20,15 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _make_receipt_number(college_id, seq: int) -> str:
+    """Generate a receipt number from college_id string slice (safe, no .binary crash)."""
+    return f"REC-{str(college_id)[-8:].upper()}-{seq:04d}"
+
+
+def _make_invoice_number(college_id, seq: int) -> str:
+    return f"INV-{str(college_id)[-8:].upper()}-{seq:04d}"
+
+
 router = APIRouter(prefix="/fees", tags=["fees"])
 
 
@@ -59,6 +68,7 @@ class FeeAssignRequest(BaseModel):
 
 
 class OnlinePaymentRequest(BaseModel):
+    student_id: Optional[str] = None  # For parent role: specify which child
     student_fee_id: Optional[str] = None
     amount: float
     payment_method: str = "UPI"
@@ -147,7 +157,8 @@ async def update_fee_structure(
     update_data = req.model_dump(exclude_unset=True)
     if update_data:
         update_data["updated_at"] = utcnow()
-        await struct.update({"$set": update_data})
+        await struct.set(update_data)
+        await struct.sync()
     return struct
 
 
@@ -250,17 +261,27 @@ async def get_student_fee_details(
     college: Annotated[College, Depends(get_tenant_college)],
     student_id: Optional[str] = None,
 ):
-    target_user_id = user.id
+    target_user_id: PydanticObjectId = user.id
+
     if user.role == UserRole.STUDENT.value:
         target_user_id = user.id
+
     elif user.role == UserRole.PARENT.value:
+        linked_ids = [str(cid) for cid in (user.profile.student_ids or [])]
         if student_id:
+            # Parent can only query their own linked children
+            if student_id not in linked_ids:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Not authorised to view this student's fees",
+                )
             target_user_id = PydanticObjectId(student_id)
-        elif user.profile and user.profile.student_ids and len(user.profile.student_ids) > 0:
-            target_user_id = PydanticObjectId(user.profile.student_ids[0])
+        elif linked_ids:
+            target_user_id = PydanticObjectId(linked_ids[0])
         else:
-            raise HTTPException(status_code=400, detail="No student associated with parent profile")
-    elif user.role in [UserRole.COLLEGE_ADMIN.value, UserRole.SUPER_ADMIN.value, UserRole.WARDEN.value]:
+            raise HTTPException(status_code=400, detail="No student linked to parent profile")
+
+    elif user.role in (UserRole.COLLEGE_ADMIN.value, UserRole.SUPER_ADMIN.value, UserRole.WARDEN.value):
         if not student_id:
             raise HTTPException(status_code=400, detail="student_id query parameter required")
         target_user_id = PydanticObjectId(student_id)
@@ -270,9 +291,9 @@ async def get_student_fee_details(
         StudentFee.student_id == target_user_id,
     ).to_list()
 
-    total_net = sum(sf.net_amount for sf in student_fees)
+    total_net  = sum(sf.net_amount  for sf in student_fees)
     total_paid = sum(sf.paid_amount for sf in student_fees)
-    total_due = sum(sf.due_amount for sf in student_fees)
+    total_due  = sum(sf.due_amount  for sf in student_fees)
 
     payments = await Payment.find(
         Payment.college_id == college.id,
@@ -291,10 +312,10 @@ async def get_student_fee_details(
 
     return {
         "summary": {
-            "total_net": total_net,
+            "total_net":  total_net,
             "total_paid": total_paid,
-            "total_due": total_due,
-            "fee_count": len(student_fees),
+            "total_due":  total_due,
+            "fee_count":  len(student_fees),
         },
         "student_fees": student_fees,
         "payments": payments,
@@ -311,15 +332,30 @@ async def submit_online_payment(
     user: Annotated[User, Depends(require_roles(UserRole.STUDENT, UserRole.PARENT))],
     college: Annotated[College, Depends(get_tenant_college)],
 ):
+    """Submit online payment — student OR parent (if req.student_id provided)."""
+    target_student_id = user.id
+
+    if user.role == UserRole.STUDENT.value:
+        target_student_id = user.id
+
+    elif user.role == UserRole.PARENT.value:
+        if not req.student_id:
+            raise HTTPException(status_code=400, detail="Parent must provide student_id in request body")
+        linked_ids = [str(cid) for cid in (user.profile.student_ids or [])]
+        if req.student_id not in linked_ids:
+            raise HTTPException(status_code=403, detail="Not authorised to pay for this student")
+        target_student_id = PydanticObjectId(req.student_id)
+
+    # Fetch target student_fee if provided
     student_fee = None
     if req.student_fee_id:
         student_fee = await StudentFee.get(PydanticObjectId(req.student_fee_id))
-        if not student_fee or student_fee.college_id != college.id:
-            raise HTTPException(status_code=404, detail="Student fee record not found")
+        if not student_fee or student_fee.college_id != college.id or student_fee.student_id != target_student_id:
+            raise HTTPException(status_code=404, detail="Student fee not found or not owned by target student")
 
     payment = Payment(
         college_id=college.id,
-        student_id=user.id,
+        student_id=target_student_id,
         student_fee_id=student_fee.id if student_fee else None,
         amount=req.amount,
         payment_mode="online",
@@ -386,9 +422,9 @@ async def record_offline_payment(
             sf.updated_at = utcnow()
             await sf.save()
 
-    # Generate Receipt
+    # Generate Receipt — safe receipt number (no .binary crash)
     receipt_count = await Receipt.find(Receipt.college_id == college.id).count()
-    rec_num = f"REC-{college.id.binary.hex()[:4].upper()}-{receipt_count + 1:04d}"
+    rec_num = _make_receipt_number(college.id, receipt_count + 1)
     receipt = Receipt(
         college_id=college.id,
         payment_id=payment.id,
@@ -416,42 +452,44 @@ async def approve_payment(
         raise HTTPException(status_code=404, detail="Payment not found")
     if payment.status == "approved":
         raise HTTPException(status_code=400, detail="Payment is already approved")
+    if payment.status == "rejected":
+        raise HTTPException(status_code=400, detail="Rejected payments cannot be re-approved")
 
     payment.status = "approved"
     payment.approved_by = str(user.id)
     payment.updated_at = utcnow()
     await payment.save()
 
-    # Apply to student fee
+    # Apply payment amount to student fee(s) — only once (idempotent: we just approved)
     if payment.student_fee_id:
         sf = await StudentFee.get(payment.student_fee_id)
-        if sf:
-            sf.paid_amount += payment.amount
-            sf.due_amount = max(0.0, sf.net_amount - sf.paid_amount)
+        if sf and sf.college_id == college.id:
+            sf.paid_amount = min(sf.paid_amount + payment.amount, sf.net_amount)
+            sf.due_amount  = max(0.0, sf.net_amount - sf.paid_amount)
             sf.status = "paid" if sf.due_amount == 0 else "partially_paid"
             sf.updated_at = utcnow()
             await sf.save()
     else:
-        s_fees = await StudentFee.find(
+        unpaid_fees = await StudentFee.find(
             StudentFee.college_id == college.id,
             StudentFee.student_id == payment.student_id,
             StudentFee.status != "paid",
         ).to_list()
-        rem = payment.amount
-        for sf in s_fees:
-            if rem <= 0:
+        remaining = payment.amount
+        for sf in unpaid_fees:
+            if remaining <= 0:
                 break
-            pay_amt = min(rem, sf.due_amount)
+            pay_amt = min(remaining, sf.due_amount)
             sf.paid_amount += pay_amt
-            sf.due_amount -= pay_amt
-            rem -= pay_amt
+            sf.due_amount  = max(0.0, sf.due_amount - pay_amt)
+            remaining -= pay_amt
             sf.status = "paid" if sf.due_amount == 0 else "partially_paid"
             sf.updated_at = utcnow()
             await sf.save()
 
-    # Generate Receipt
+    # Generate Receipt — safe receipt number
     receipt_count = await Receipt.find(Receipt.college_id == college.id).count()
-    rec_num = f"REC-{college.id.binary.hex()[:4].upper()}-{receipt_count + 1:04d}"
+    rec_num = _make_receipt_number(college.id, receipt_count + 1)
     receipt = Receipt(
         college_id=college.id,
         payment_id=payment.id,
@@ -464,7 +502,6 @@ async def approve_payment(
     )
     await receipt.insert()
 
-    # Auto-notify student that payment is confirmed
     background_tasks.add_task(
         notify_fee_paid,
         college_id=college.id,
@@ -501,16 +538,33 @@ async def get_payments(
     status_filter: Optional[str] = None,
     student_id: Optional[str] = None,
 ):
+    # Always scope to the current college
     filters = [Payment.college_id == college.id]
+
+    if user.role == UserRole.STUDENT.value:
+        # Students see only their own payments
+        filters.append(Payment.student_id == user.id)
+    elif user.role == UserRole.PARENT.value:
+        # Parent sees linked children's payments
+        linked_ids = [str(cid) for cid in (user.profile.student_ids or [])]
+        if student_id:
+            if student_id not in linked_ids:
+                raise HTTPException(status_code=403, detail="Not authorised to view this student's payments")
+            filters.append(Payment.student_id == PydanticObjectId(student_id))
+        elif linked_ids:
+            child_oids = [PydanticObjectId(cid) for cid in linked_ids if PydanticObjectId.is_valid(cid)]
+            filters.append({"student_id": {"$in": child_oids}})
+        else:
+            return []
+    else:
+        # Admin: optional student filter
+        if student_id:
+            filters.append(Payment.student_id == PydanticObjectId(student_id))
+
     if status_filter:
         filters.append(Payment.status == status_filter)
-    if student_id:
-        filters.append(Payment.student_id == PydanticObjectId(student_id))
-    elif user.role == UserRole.STUDENT.value:
-        filters.append(Payment.student_id == user.id)
 
-    payments = await Payment.find(*filters).sort("-payment_date").to_list()
-    return payments
+    return await Payment.find(*filters).sort("-payment_date").to_list()
 
 
 # ---------------- INVOICE & RECEIPT GENERATION ---------------- #
@@ -538,7 +592,7 @@ async def generate_invoice(
     due_amt = sum(sf.due_amount for sf in unpaid_fees)
 
     inv_count = await Invoice.find(Invoice.college_id == college.id).count()
-    inv_num = f"INV-{college.id.binary.hex()[:4].upper()}-{inv_count + 1:04d}"
+    inv_num = _make_invoice_number(college.id, inv_count + 1)
 
     due_dt = datetime.fromisoformat(req.due_date.replace("Z", "+00:00")) if "T" in req.due_date else datetime.strptime(req.due_date, "%Y-%m-%d")
 
@@ -664,9 +718,12 @@ async def get_pending_dues(
     if not student_fees:
         return []
 
-    # Map to student details
+    # Map to student details — scope users to this college
     student_user_ids = list({sf.student_id for sf in student_fees})
-    users_list = await User.find({"_id": {"$in": student_user_ids}}).to_list()
+    users_list = await User.find(
+        User.college_id == college.id,
+        {"_id": {"$in": student_user_ids}},
+    ).to_list()
     students_list = await Student.find(
         Student.college_id == college.id,
         {"user_id": {"$in": student_user_ids}},
