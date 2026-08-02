@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
 
     AI_RATE_LIMIT_PER_MINUTE: int = 10
+    
+    SETUP_KEY: str = ""  # Optional: Set to secure the seed endpoint
 
     @property
     def allowed_origins_list(self) -> List[str]:

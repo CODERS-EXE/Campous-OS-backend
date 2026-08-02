@@ -86,8 +86,17 @@ async def root():
 
 
 @app.post("/api/v1/setup/seed")
-async def seed_database():
+async def seed_database(setup_key: str = Query(..., description="Setup key from environment")):
     """One-time setup endpoint to seed database with super admin and demo data"""
+    from app.core.config import get_settings
+    settings = get_settings()
+    
+    # Check setup key (optional security - can be disabled after first run)
+    expected_key = settings.SETUP_KEY if hasattr(settings, 'SETUP_KEY') else None
+    if expected_key and setup_key != expected_key:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail="Invalid setup key")
+    
     from app.models.user import User
     from app.models.college import College
     from app.models.student import Student
@@ -177,12 +186,7 @@ async def seed_database():
     
     return {
         "message": "Database seeded successfully",
-        "accounts": {
-            "super_admin": "admin@campusos.com / admin123",
-            "college_admin": "admin@demo.edu / Demo@123",
-            "student": "alice@demo.edu / Demo@123",
-            "faculty": "bob@demo.edu / Demo@123"
-        }
+        "note": "Login credentials sent separately"
     }
 
 
