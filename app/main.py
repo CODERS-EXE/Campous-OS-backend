@@ -4,6 +4,7 @@ import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from fastapi.middleware.base import BaseHTTPMiddleware
 # pyrefly: ignore [missing-import]
 from slowapi import Limiter, _rate_limit_exceeded_handler
 # pyrefly: ignore [missing-import]
@@ -50,14 +51,37 @@ async def invalid_id_exception_handler(request, exc):
     return JSONResponse(status_code=400, content={"detail": "Invalid ID format"})
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.allowed_origins_list,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
-    expose_headers=["*"]
-)
+class CustomCORSMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        origin = request.headers.get("origin")
+        
+        # Handle preflight requests
+        if request.method == "OPTIONS":
+            allowed_origins = settings.allowed_origins_list
+            
+            response = Response()
+            if origin and origin in allowed_origins:
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+                response.headers["Access-Control-Allow-Headers"] = "Accept, Accept-Language, Content-Language, Content-Type, Authorization, X-Requested-With"
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+                response.headers["Access-Control-Max-Age"] = "86400"
+            return response
+        
+        # Process the request
+        response = await call_next(request)
+        
+        # Add CORS headers to all responses
+        allowed_origins = settings.allowed_origins_list
+        if origin and origin in allowed_origins:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Expose-Headers"] = "*"
+        
+        return response
+
+
+app.add_middleware(CustomCORSMiddleware)
 
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(colleges.router, prefix="/api/v1")
@@ -77,24 +101,6 @@ app.include_router(exams.router, prefix="/api/v1")
 app.include_router(search.router, prefix="/api/v1")
 
 
-@app.options("/{full_path:path}")
-async def options_handler(request: Request, full_path: str):
-    """Handle OPTIONS requests explicitly"""
-    response = Response()
-    origin = request.headers.get("origin")
-    
-    # Check if origin is allowed
-    allowed_origins = settings.allowed_origins_list
-    if origin in allowed_origins:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Max-Age"] = "86400"
-    
-    return response
-
-
 @app.get("/health")
 async def health():
     return {"status": "ok", "app": settings.APP_NAME, "version": settings.APP_VERSION}
@@ -108,6 +114,18 @@ async def debug_cors():
         "allowed_origins_list": settings.allowed_origins_list,
         "app_name": settings.APP_NAME,
         "debug_mode": settings.DEBUG
+    }
+
+
+@app.post("/api/v1/debug/test-cors")
+async def test_cors(request: Request):
+    """Test endpoint to verify CORS is working"""
+    origin = request.headers.get("origin")
+    return {
+        "message": "CORS test successful",
+        "origin": origin,
+        "allowed": origin in settings.allowed_origins_list,
+        "timestamp": "2024-01-01T00:00:00Z"
     }
 
 
