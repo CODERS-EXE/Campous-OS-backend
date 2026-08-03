@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    ALLOWED_ORIGINS: str = "http://localhost:3000,https://campous-os-frontend.vercel.app"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,https://campous-os-frontend.vercel.app,https://campous-os-frontend-eiv93he0h-team-poonam.vercel.app"
 
     CLOUDINARY_CLOUD_NAME: str = ""
     CLOUDINARY_API_KEY: str = ""
@@ -38,10 +38,14 @@ class Settings(BaseSettings):
     @property
     def allowed_origins_list(self) -> List[str]:
         origins = [o.strip() for o in self.ALLOWED_ORIGINS.replace('\n', '').split(",") if o.strip()]
-        # Ensure Vercel URL is always included in production
-        vercel_url = "https://campous-os-frontend.vercel.app"
-        if vercel_url not in origins:
-            origins.append(vercel_url)
+        # Always include the main Vercel URL
+        vercel_urls = [
+            "https://campous-os-frontend.vercel.app",
+            "https://campous-os-frontend-eiv93he0h-team-poonam.vercel.app"
+        ]
+        for vercel_url in vercel_urls:
+            if vercel_url not in origins:
+                origins.append(vercel_url)
         return origins
 
 
