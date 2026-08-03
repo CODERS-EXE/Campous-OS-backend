@@ -37,7 +37,12 @@ class Settings(BaseSettings):
 
     @property
     def allowed_origins_list(self) -> List[str]:
-        return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
+        origins = [o.strip() for o in self.ALLOWED_ORIGINS.replace('\n', '').split(",") if o.strip()]
+        # Ensure Vercel URL is always included in production
+        vercel_url = "https://campous-os-frontend.vercel.app"
+        if vercel_url not in origins:
+            origins.append(vercel_url)
+        return origins
 
 
 @lru_cache

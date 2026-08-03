@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
 import logging
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 # pyrefly: ignore [missing-import]
 from slowapi import Limiter, _rate_limit_exceeded_handler
 # pyrefly: ignore [missing-import]
@@ -53,8 +54,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 app.include_router(auth.router, prefix="/api/v1")
@@ -73,6 +75,24 @@ app.include_router(library.router, prefix="/api/v1")
 app.include_router(placements.router, prefix="/api/v1")
 app.include_router(exams.router, prefix="/api/v1")
 app.include_router(search.router, prefix="/api/v1")
+
+
+@app.options("/{full_path:path}")
+async def options_handler(request: Request, full_path: str):
+    """Handle OPTIONS requests explicitly"""
+    response = Response()
+    origin = request.headers.get("origin")
+    
+    # Check if origin is allowed
+    allowed_origins = settings.allowed_origins_list
+    if origin in allowed_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Max-Age"] = "86400"
+    
+    return response
 
 
 @app.get("/health")
