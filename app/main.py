@@ -57,26 +57,46 @@ class CustomCORSMiddleware(BaseHTTPMiddleware):
         
         # Handle preflight requests
         if request.method == "OPTIONS":
-            allowed_origins = settings.allowed_origins_list
-            
             response = Response()
-            if origin and origin in allowed_origins:
+            
+            # Be more permissive - allow Vercel domains
+            allowed_origins = settings.allowed_origins_list
+            is_allowed = False
+            
+            if origin:
+                # Check exact matches
+                if origin in allowed_origins:
+                    is_allowed = True
+                # Also allow any vercel.app subdomain for safety
+                elif origin.endswith('.vercel.app') and 'campous-os-frontend' in origin:
+                    is_allowed = True
+            
+            if is_allowed:
                 response.headers["Access-Control-Allow-Origin"] = origin
                 response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
-                response.headers["Access-Control-Allow-Headers"] = "Accept, Accept-Language, Content-Language, Content-Type, Authorization, X-Requested-With"
+                response.headers["Access-Control-Allow-Headers"] = "Accept, Accept-Language, Content-Language, Content-Type, Authorization, X-Requested-With, X-College-Id, X-College-Subdomain"
                 response.headers["Access-Control-Allow-Credentials"] = "true"
                 response.headers["Access-Control-Max-Age"] = "86400"
+            
             return response
         
         # Process the request
         response = await call_next(request)
         
         # Add CORS headers to all responses
-        allowed_origins = settings.allowed_origins_list
-        if origin and origin in allowed_origins:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Expose-Headers"] = "*"
+        if origin:
+            allowed_origins = settings.allowed_origins_list
+            is_allowed = False
+            
+            if origin in allowed_origins:
+                is_allowed = True
+            elif origin.endswith('.vercel.app') and 'campous-os-frontend' in origin:
+                is_allowed = True
+            
+            if is_allowed:
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+                response.headers["Access-Control-Expose-Headers"] = "*"
         
         return response
 
