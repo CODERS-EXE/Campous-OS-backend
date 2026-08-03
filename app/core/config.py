@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    ALLOWED_ORIGINS: str = "http://localhost:3000,https://campous-os-frontend.vercel.app,https://campous-os-frontend-eiv93he0h-team-poonam.vercel.app"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,https://campous-os-frontend.vercel.app,https://campous-os-frontend-eiv93he0h-team-poonam.vercel.app,https://campous-os-frontend-4zfnf7rxs-team-poonam.vercel.app"
 
     CLOUDINARY_CLOUD_NAME: str = ""
     CLOUDINARY_API_KEY: str = ""
@@ -41,7 +41,8 @@ class Settings(BaseSettings):
         # Always include the main Vercel URL
         vercel_urls = [
             "https://campous-os-frontend.vercel.app",
-            "https://campous-os-frontend-eiv93he0h-team-poonam.vercel.app"
+            "https://campous-os-frontend-eiv93he0h-team-poonam.vercel.app",
+            "https://campous-os-frontend-4zfnf7rxs-team-poonam.vercel.app"
         ]
         for vercel_url in vercel_urls:
             if vercel_url not in origins:
