@@ -4,7 +4,7 @@ import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from fastapi.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 # pyrefly: ignore [missing-import]
 from slowapi import Limiter, _rate_limit_exceeded_handler
 # pyrefly: ignore [missing-import]
