@@ -80,6 +80,17 @@ async def health():
     return {"status": "ok", "app": settings.APP_NAME, "version": settings.APP_VERSION}
 
 
+@app.get("/api/v1/debug/cors")
+async def debug_cors():
+    """Debug endpoint to check CORS configuration"""
+    return {
+        "allowed_origins": settings.ALLOWED_ORIGINS,
+        "allowed_origins_list": settings.allowed_origins_list,
+        "app_name": settings.APP_NAME,
+        "debug_mode": settings.DEBUG
+    }
+
+
 @app.get("/api/v1/debug/test-db")
 async def test_db():
     """Debug endpoint to test database connection"""
